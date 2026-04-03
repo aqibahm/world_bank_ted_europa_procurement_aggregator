@@ -4,13 +4,12 @@ Global Procurement Tracker — Multi-Source Streamlit App
 Sources:
   - World Bank (IBRD + IDA)  → JSON API, no key
   - TED Europa (EU)          → REST API, no key
-  - ADB (Asia-Pacific)       → RSS feed via feedparser
   - SAM.gov (US Federal)     → JSON API, free key required
 
 Setup:
     python3 -m venv venv
     source venv/bin/activate
-    pip install streamlit requests feedparser
+    pip install streamlit requests
     streamlit run procurement_tracker.py
 
 SAM.gov API key (free):
@@ -120,6 +119,7 @@ section[data-testid="stSidebar"] .stButton button {
     border-radius: 6px !important;
 }
 section[data-testid="stSidebar"] .stButton button:hover { background: #d0dff5 !important; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -241,57 +241,53 @@ def fetch_worldbank(keyword: str, rows: int) -> list:
 # TED supports keyword search via the `q` URL param in RSS mode
 
 def fetch_ted_rss(keyword: str, rows: int) -> list:
-    """TED Europa via confirmed public RSS feeds."""
-    import re
+    """TED Europa fallback via requests XML parsing — no feedparser needed."""
+    import xml.etree.ElementTree as ET
     kw = keyword.strip().lower()
 
-    # Confirmed working TED RSS endpoints
-    feeds = [
-        "https://ted.europa.eu/en/simap/rss-feed/-/rss/search/comp",   # competition notices
-        "https://ted.europa.eu/en/simap/rss-feed/-/rss/search/prpu",   # prior/planning notices
-    ]
+    feed_url = "https://ted.europa.eu/en/simap/rss-feed/-/rss/search/comp"
 
     results = []
-    for feed_url in feeds:
-        try:
-            feed = feedparser.parse(feed_url)
-            for entry in feed.entries:
-                title   = entry.get("title", "Untitled")
-                link    = entry.get("link", "")
-                summary = entry.get("summary", "") or ""
+    try:
+        r = requests.get(feed_url, timeout=15,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        ns = {"dc": "http://purl.org/dc/elements/1.1/"}
+        items = root.findall(".//item")
 
-                # Keyword filter — title format: "12345-2026: Country – Sector – Description"
-                if kw and kw not in title.lower() and kw not in summary.lower():
-                    continue
+        for item in items:
+            title   = (item.findtext("title") or "Untitled").strip()
+            link    = (item.findtext("link") or "").strip()
+            desc    = (item.findtext("description") or "").strip()
+            pubdate = (item.findtext("pubDate") or "")[:10]
 
-                # Parse title: "12345-2026: Romania – Construction work – Project name"
-                country = ""
-                notice_type = "Contract Notice"
-                parts = title.split("–")
-                if len(parts) >= 2:
-                    country = parts[0].split(":")[-1].strip() if ":" in parts[0] else parts[0].strip()
-                    notice_type = parts[1].strip() if len(parts) > 1 else "Contract Notice"
+            if kw and kw not in title.lower() and kw not in desc.lower():
+                continue
 
-                # Published date from feed
-                pub = entry.get("published", "") or ""
-                deadline = pub[:10] if pub else ""
+            # Parse: "12345-2026: Romania – Construction work – Project name"
+            parts = title.split("–")
+            country = ""
+            notice_type = "Contract Notice"
+            if len(parts) >= 2:
+                country     = parts[0].split(":")[-1].strip() if ":" in parts[0] else parts[0].strip()
+                notice_type = parts[1].strip()
 
-                results.append({
-                    "source":   "TED Europa",
-                    "title":    parts[-1].strip() if len(parts) >= 3 else title,
-                    "type":     notice_type,
-                    "country":  country,
-                    "agency":   "",
-                    "deadline": deadline,
-                    "amount":   "",
-                    "link":     link,
-                })
-                if len(results) >= rows:
-                    break
-        except Exception:
-            continue
-        if len(results) >= rows:
-            break
+            results.append({
+                "source":   "TED Europa",
+                "title":    parts[-1].strip() if len(parts) >= 3 else title,
+                "type":     notice_type,
+                "country":  country,
+                "agency":   "",
+                "deadline": pubdate,
+                "amount":   "",
+                "link":     link,
+            })
+            if len(results) >= rows:
+                break
+
+    except Exception as e:
+        return [{"source": "TED Europa", "title": f"⚠️ TED unavailable: {e}", "type": "", "country": "", "agency": "", "deadline": "", "amount": "", "link": "https://ted.europa.eu"}]
 
     if not results:
         return [{"source": "TED Europa", "title": "No TED results — try a broader keyword", "type": "", "country": "", "agency": "", "deadline": "", "amount": "", "link": "https://ted.europa.eu"}]
@@ -475,57 +471,6 @@ def fetch_ted(keyword: str, rows: int) -> list:
 #  SOURCE 3 — ADB (RSS)
 # ══════════════════════════════════════════════════════════════
 
-ADB_FEEDS = {
-    "Consulting Services": "https://www.adb.org/rss/projects/tenders/consulting",
-    "Invitation for Bids": "https://www.adb.org/rss/projects/tenders/invitation-bids",
-    "Advanced Notices":    "https://www.adb.org/rss/projects/tenders/advanced-notices",
-}
-
-def fetch_adb(keyword: str, rows: int) -> list:
-    results = []
-    kw = keyword.strip().lower()
-
-    for feed_type, feed_url in ADB_FEEDS.items():
-        try:
-            feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:rows]:
-                title   = entry.get("title", "Untitled")
-                summary = entry.get("summary", "")
-                link    = entry.get("link", "")
-                # Try to extract deadline from summary
-                deadline = ""
-                if "deadline" in summary.lower():
-                    for part in summary.split():
-                        if "-" in part and len(part) == 10:
-                            deadline = part
-                            break
-                # Keyword filter
-                if kw and kw not in title.lower() and kw not in summary.lower():
-                    continue
-
-                # Extract country from title (format: "Title; Country; Sector")
-                parts   = title.split(";")
-                country = parts[1].strip() if len(parts) > 1 else ""
-                clean_title = parts[0].strip()
-
-                results.append({
-                    "source":   "ADB",
-                    "title":    clean_title,
-                    "type":     feed_type,
-                    "country":  country,
-                    "agency":   "",
-                    "deadline": deadline,
-                    "amount":   "",
-                    "link":     link,
-                })
-        except Exception as e:
-            results.append({
-                "source": "ADB", "title": f"⚠️ Feed error: {e}",
-                "type": "", "country": "", "agency": "",
-                "deadline": "", "amount": "", "link": "",
-            })
-
-    return results[:rows]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -647,22 +592,21 @@ st.markdown("""
 
 # About panel
 if st.session_state.get("show_about", False):
-    st.markdown("""
-<div style="background:linear-gradient(135deg,#f8fafd,#eef3fa);border:1px solid #c8d8ed;
-    border-left:4px solid #005BAA;border-radius:12px;padding:1.5rem 2rem;margin-bottom:1.5rem;">
-    <h4 style="margin:0 0 0.8rem;color:#002244;font-family:'DM Serif Display',serif;">About This App</h4>
-    <p style="font-size:0.88rem;color:#334155;line-height:1.7;margin:0 0 0.8rem;">
-        The <strong>Global Procurement Tracker</strong> aggregates live procurement opportunities
-        from four major international donors into a single searchable interface — World Bank (IBRD + IDA),
-        TED Europa (EU) — fetched live from their public APIs.
-        All sources are fetched in parallel. No data is stored or cached.
-    </p>
-    <p style="font-size:0.8rem;color:#64748b;border-top:1px solid #c8d8ed;padding-top:0.8rem;margin:0;">
-        Developed by <strong style="color:#002244;">Aqib Ahmed</strong>
-        · Associate Consultant · <strong style="color:#002244;">KPMG G&amp;PS</strong>
-    </p>
-</div>
-""", unsafe_allow_html=True)
+    with st.container(border=True):
+        col_title, col_btn = st.columns([9, 1])
+        with col_title:
+            st.markdown("#### About This App")
+        with col_btn:
+            if st.button("✕", key="close_about"):
+                st.session_state["show_about"] = False
+                st.rerun()
+        st.markdown(
+            "The **Global Procurement Tracker** aggregates live procurement opportunities "
+            "from major international donors — World Bank (IBRD + IDA) and TED Europa (EU) — "
+            "fetched live from their public APIs. All sources are fetched in parallel. "
+            "No data is stored or cached."
+        )
+        st.caption("Developed by **Aqib Ahmed** · Associate Consultant · **KPMG G&PS**")
 
 # Fetch on load or search
 if "all_notices" not in st.session_state or search_btn:
