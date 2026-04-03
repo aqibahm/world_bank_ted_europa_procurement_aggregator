@@ -69,7 +69,7 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 @media (max-width: 480px) {
     .app-header { padding: 1.2rem 1.2rem; }
     .app-header div[style*="flex"] { flex-direction: column; align-items: flex-start !important; }
-    .app-header div[style*="text-align:right"] { text-align: right !important; align-self: flex-end; }
+    .app-header div[style*="text-align:left"] { text-align: left !important; align-self: flex-start; }
     .app-header p[style*="white-space:nowrap"] { white-space: normal !important; }
 }
 
@@ -582,7 +582,7 @@ st.markdown("""
             <h1>🌐 Global Procurement Tracker</h1>
             <p>World Bank · TED Europa — all in one place · Live data</p>
         </div>
-        <div style="text-align:right;flex-shrink:0;">
+        <div style="text-align:left;flex-shrink:0;">
             <p style="margin:0;font-size:0.72rem;opacity:0.6;line-height:1.7;white-space:nowrap;">
                 Built by <strong style="opacity:0.9;">Aqib Ahmed</strong>, KPMG G&amp;PS<br>
                 <em>Personal initiative, not an official KPMG tool</em>
