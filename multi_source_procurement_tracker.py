@@ -69,8 +69,8 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 @media (max-width: 480px) {
     .app-header { padding: 1.2rem 1.2rem; }
     .app-header div[style*="flex"] { flex-direction: column; align-items: flex-start !important; }
-    .app-header div[style*="text-align:right"] { text-align: left !important; }
-    .app-header div[style*="white-space:nowrap"] p { white-space: normal !important; }
+    .app-header div[style*="text-align:right"] { text-align: right !important; align-self: flex-end; }
+    .app-header p[style*="white-space:nowrap"] { white-space: normal !important; }
 }
 
 .notice-card {
@@ -203,7 +203,6 @@ def fetch_worldbank(keyword: str, rows: int) -> list:
         "format": "json", "apilang": "en", "srce": "both",
         "rows": rows, "os": 0,
         "srt": "submission_deadline_date", "order": "desc",
-        "fl": "id,notice_type,project_name,project_ctry_name,submission_deadline_date,contact_agency,url",
     }
     if keyword.strip():
         params["qterm"] = keyword.strip()
