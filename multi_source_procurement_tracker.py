@@ -59,11 +59,19 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 }
 .app-header h1 {
     font-family: 'DM Serif Display', serif;
-    font-size: 2.2rem;
+    font-size: clamp(1.2rem, 4vw, 2.2rem);
     margin: 0 0 0.3rem 0;
     letter-spacing: -0.5px;
+    word-break: break-word;
 }
 .app-header p { opacity: 0.75; font-size: 0.9rem; margin: 0; }
+
+@media (max-width: 480px) {
+    .app-header { padding: 1.2rem 1.2rem; }
+    .app-header div[style*="flex"] { flex-direction: column; align-items: flex-start !important; }
+    .app-header div[style*="text-align:right"] { text-align: left !important; }
+    .app-header div[style*="white-space:nowrap"] p { white-space: normal !important; }
+}
 
 .notice-card {
     background: white;
@@ -570,17 +578,15 @@ with st.sidebar:
 
 st.markdown("""
 <div class="app-header">
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;">
-        <div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:0.5rem;">
+        <div style="min-width:0;flex:1;">
             <h1>🌐 Global Procurement Tracker</h1>
             <p>World Bank · TED Europa — all in one place · Live data</p>
         </div>
-        <div style="text-align:right;flex-shrink:0;margin-left:2rem;">
-            <p style="margin:0;font-size:0.72rem;opacity:0.6;line-height:1.7;">
-                Developed by<br>
-                <strong style="opacity:0.9;">Aqib Ahmed</strong><br>
-                Associate Consultant · KPMG G&amp;PS<br>
-                <em style="opacity:0.8;">Personal initiative, not an official KPMG tool</em>
+        <div style="text-align:right;flex-shrink:0;">
+            <p style="margin:0;font-size:0.72rem;opacity:0.6;line-height:1.7;white-space:nowrap;">
+                Built by <strong style="opacity:0.9;">Aqib Ahmed</strong>, KPMG G&amp;PS<br>
+                <em>Personal initiative, not an official KPMG tool</em>
             </p>
         </div>
     </div>
