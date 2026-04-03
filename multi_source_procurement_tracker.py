@@ -526,9 +526,6 @@ def fetch_samgov(keyword: str, rows: int) -> list:
 # ══════════════════════════════════════════════════════════════
 
 with st.sidebar:
-    if st.button("ℹ︎ About", use_container_width=True, key="about_btn"):
-        st.session_state["show_about"] = not st.session_state.get("show_about", False)
-
     st.markdown("---")
     st.markdown("### 🔍 Search")
 
@@ -582,30 +579,13 @@ st.markdown("""
             <p style="margin:0;font-size:0.72rem;opacity:0.6;line-height:1.7;">
                 Developed by<br>
                 <strong style="opacity:0.9;">Aqib Ahmed</strong><br>
-                Associate Consultant · KPMG G&amp;PS
+                Associate Consultant · KPMG G&amp;PS<br>
+                <em style="opacity:0.8;">Personal initiative, not an official KPMG tool</em>
             </p>
         </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
-
-# About panel
-if st.session_state.get("show_about", False):
-    with st.container(border=True):
-        col_title, col_btn = st.columns([9, 1])
-        with col_title:
-            st.markdown("#### About This App")
-        with col_btn:
-            if st.button("✕", key="close_about"):
-                st.session_state["show_about"] = False
-                st.rerun()
-        st.markdown(
-            "The **Global Procurement Tracker** aggregates live procurement opportunities "
-            "from major international donors — World Bank (IBRD + IDA) and TED Europa (EU) — "
-            "fetched live from their public APIs. All sources are fetched in parallel. "
-            "No data is stored or cached."
-        )
-        st.caption("Built by **Aqib Ahmed**, KPMG G&PS · Personal initiative, not an official KPMG tool")
 
 # Fetch on load or search
 if "all_notices" not in st.session_state or search_btn:
