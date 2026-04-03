@@ -18,7 +18,6 @@ SAM.gov API key (free):
 """
 
 import requests
-import feedparser
 import streamlit as st
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
