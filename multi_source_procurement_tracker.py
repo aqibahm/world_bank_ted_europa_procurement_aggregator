@@ -561,9 +561,8 @@ with st.sidebar:
     st.markdown("""
 <div style="padding-top:0.5rem;">
 <p style="font-size:0.72rem;color:#5a7a9a;line-height:1.6;margin:0;">
-    Developed by<br>
-    <strong style="color:#003a70;">Aqib Ahmed</strong><br>
-    Associate Consultant · KPMG G&amp;PS
+    Built by <strong style="color:#003a70;">Aqib Ahmed</strong>, KPMG G&amp;PS<br>
+    <em>Personal initiative, not an official KPMG tool</em>
 </p>
 </div>
 """, unsafe_allow_html=True)
@@ -606,7 +605,7 @@ if st.session_state.get("show_about", False):
             "fetched live from their public APIs. All sources are fetched in parallel. "
             "No data is stored or cached."
         )
-        st.caption("Developed by **Aqib Ahmed** · Associate Consultant · **KPMG G&PS**")
+        st.caption("Built by **Aqib Ahmed**, KPMG G&PS · Personal initiative, not an official KPMG tool")
 
 # Fetch on load or search
 if "all_notices" not in st.session_state or search_btn:
