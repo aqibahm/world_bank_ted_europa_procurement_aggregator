@@ -563,7 +563,7 @@ with st.sidebar:
             search_btn = True
 
     st.markdown("---")
-    st.caption("Live data · No API key required for most sources")
+    st.caption("Live data from multiple procurement portals worldwide.")
     st.markdown("""
 <div style="padding-top:0.5rem;">
 <p style="font-size:0.72rem;color:#5a7a9a;line-height:1.6;margin:0;">
