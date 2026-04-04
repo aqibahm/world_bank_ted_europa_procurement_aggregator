@@ -127,7 +127,9 @@ section[data-testid="stSidebar"] .stButton button {
     border-radius: 6px !important;
 }
 section[data-testid="stSidebar"] .stButton button:hover { background: #d0dff5 !important; }
-[data-testid="stToolbar"] { display: none !important; }
+[data-testid="stToolbarActions"] {
+    display: none !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
