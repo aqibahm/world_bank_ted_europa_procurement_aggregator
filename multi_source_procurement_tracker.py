@@ -576,6 +576,8 @@ with st.sidebar:
 #  MAIN CONTENT
 # ══════════════════════════════════════════════════════════════
 
+st.title("BidAtlas")
+
 st.markdown("""
 <div class="app-header">
     <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:0.5rem;">
