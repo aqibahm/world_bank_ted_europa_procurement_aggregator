@@ -127,7 +127,7 @@ section[data-testid="stSidebar"] .stButton button {
     border-radius: 6px !important;
 }
 section[data-testid="stSidebar"] .stButton button:hover { background: #d0dff5 !important; }
-
+[data-testid="stToolbar"] { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -565,8 +565,7 @@ with st.sidebar:
     st.markdown("""
 <div style="padding-top:0.5rem;">
 <p style="font-size:0.72rem;color:#5a7a9a;line-height:1.6;margin:0;">
-    Built by <strong style="color:#003a70;">Aqib Ahmed</strong>, KPMG G&amp;PS<br>
-    <em>Personal initiative, not an official KPMG tool</em>
+    Built by <strong style="color:#003a70;">Aqib Ahmed</strong>.
 </p>
 </div>
 """, unsafe_allow_html=True)
@@ -584,8 +583,7 @@ st.markdown("""
         </div>
         <div style="text-align:left;flex-shrink:0;">
             <p style="margin:0;font-size:0.72rem;opacity:0.6;line-height:1.7;white-space:nowrap;">
-                Built by <strong style="opacity:0.9;">Aqib Ahmed</strong>, KPMG G&amp;PS<br>
-                <em>Personal initiative, not an official KPMG tool</em>
+                Built by <strong style="opacity:0.9;">Aqib Ahmed</strong>.
             </p>
         </div>
     </div>
