@@ -773,7 +773,7 @@ st.markdown("""
   <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:0.5rem;">
     <div style="min-width:0;flex:1;">
       <h1>🌐 BidAtlas — Global Procurement Tracker</h1>
-      <p>World Bank · TED Europa · Live data · Click ▶ on any card to expand full details</p>
+      <p>World Bank · TED Europa · Live data</p>
       <p style="margin-top:0.4rem;font-size:0.72rem;opacity:0.55;">Built by <strong style="opacity:0.9;">Aqib Ahmed</strong></p>
     </div>
   </div>
