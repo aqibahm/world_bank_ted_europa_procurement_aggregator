@@ -8,7 +8,7 @@ Sources:
 Setup:
     python3 -m venv venv
     source venv/bin/activate
-    pip install streamlit requests
+    pip install streamlit requests deep-translator
     streamlit run procurement_tracker.py
 """
 
@@ -16,6 +16,11 @@ import requests
 import streamlit as st
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    from deep_translator import GoogleTranslator
+    _TRANSLATOR_AVAILABLE = True
+except ImportError:
+    _TRANSLATOR_AVAILABLE = False
 RESULTS_LIMIT = 10
 
 # ══════════════════════════════════════════════════════════════
@@ -166,6 +171,30 @@ def fmt_date(date_str: str) -> str:
         return datetime.strptime(date_str[:10], "%Y-%m-%d").strftime("%d-%m-%Y")
     except Exception:
         return date_str[:10]
+
+def _translate(text: str) -> str:
+    """Translate text to English using Google Translate via deep-translator.
+    Falls back silently to the original text on any error."""
+    if not _TRANSLATOR_AVAILABLE or not text or not text.strip():
+        return text
+    try:
+        translated = GoogleTranslator(source="auto", target="en").translate(text)
+        return translated if translated else text
+    except Exception:
+        return text
+
+
+def _translate_notice(notice: dict) -> dict:
+    """Return a copy of the notice with title and type translated to English.
+    Only applied to TED Europa notices (World Bank API always returns English)."""
+    if notice.get("source") != "TED Europa":
+        return notice
+    return {
+        **notice,
+        "title": _translate(notice.get("title", "")),
+        "type":  _translate(notice.get("type", "")),
+    }
+
 
 def deadline_badge(dl: str) -> str:
     if not dl or dl.strip() in ("", "N"):
@@ -569,7 +598,7 @@ def fetch_ted(keyword: str, rows: int) -> list:
                 "borrower":           _fv(n, "buyer-legal-type") if enriched else "",
                 "contact":            "",
             })
-        return results
+        return [_translate_notice(n) for n in results]
 
     try:
         # ── Attempt 1: enriched field list ──────────────────────────────
@@ -673,7 +702,7 @@ def _fetch_ted_rss(keyword: str, rows: int) -> list:
                 continue
             results = _parse_rss_items(raw_text, kw, rows)
             if results:
-                return results
+                return [_translate_notice(n) for n in results]
             last_err = "No keyword matches in feed"
         except Exception as e:
             last_err = str(e)
@@ -741,11 +770,41 @@ with st.sidebar:
 
 st.markdown("""
 <div class="app-header">
-  <h1>🌐 BidAtlas — Global Procurement Tracker</h1>
-  <p>World Bank · TED Europa · Live data · Click ▶ on any card to expand full details</p>
-  <p style="margin-top:0.4rem;font-size:0.72rem;opacity:0.55;">Built by <strong style="opacity:0.9;">Aqib Ahmed</strong></p>
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:0.5rem;">
+    <div style="min-width:0;flex:1;">
+      <h1>🌐 BidAtlas — Global Procurement Tracker</h1>
+      <p>World Bank · TED Europa · Live data · Click ▶ on any card to expand full details</p>
+      <p style="margin-top:0.4rem;font-size:0.72rem;opacity:0.55;">Built by <strong style="opacity:0.9;">Aqib Ahmed</strong></p>
+    </div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
+
+# ── Version changelog expander ─────────────────────────────────
+with st.expander("📦 v1.5 — Click to view version changes", expanded=False):
+    st.markdown("""
+**v1.5** *(current)*
+- Added automatic translation of TED Europa notices to English via `deep-translator`
+
+**v1.4**
+- Dates now displayed in DD-MM-YYYY format across cards and detail panels
+
+**v1.3**
+- Integrated enriched field fetching for both World Bank and TED Europa
+- Full Details panel with 4 structured sections: Identification, Procurement Details, Buyer / Authority, Financials
+- Robust TED API two-tier fallback (enriched → core fields → RSS)
+- Malformed RSS XML handled via regex parser instead of `xml.etree`
+
+**v1.2**
+- Added World Bank and TED Europa multi-source parallel fetching
+- Deadline urgency badges (🟢 / 🟡 / 🔴) with days-remaining count
+- Country, source, and nature filter controls
+
+**v1.1**
+- Initial multi-source procurement tracker
+- World Bank JSON API integration
+- TED Europa RSS fallback
+""")
 
 # ── Fetch ─────────────────────────────────────────────────────
 
@@ -788,7 +847,7 @@ if all_notices:
     cols = st.columns(len(source_counts) + 3)
     cols[0].metric("Total Notices", len(all_notices))
     cols[1].metric("Closing ≤14d",  urgent)
-    cols[2].metric("Award Value Known",     with_val)
+    cols[2].metric("With Value",     with_val)
     for i, (src, count) in enumerate(source_counts.items(), 3):
         cols[i].metric(src, count)
 
