@@ -773,7 +773,7 @@ st.markdown("""
   <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:0.5rem;">
     <div style="min-width:0;flex:1;">
       <h1>🌐 BidAtlas — Global Procurement Tracker</h1>
-      <p>World Bank · TED Europa · Live data</p>
+      <p>World Bank · TED Europa · Live data · Click ▶ on any card to expand full details</p>
       <p style="margin-top:0.4rem;font-size:0.72rem;opacity:0.55;">Built by <strong style="opacity:0.9;">Aqib Ahmed</strong></p>
     </div>
   </div>
@@ -804,6 +804,26 @@ with st.expander("📦 v1.5 — Click to view version changes", expanded=False):
 - Initial multi-source procurement tracker
 - World Bank JSON API integration
 - TED Europa RSS fallback
+""")
+
+# ── Legal expanders ───────────────────────────────────────────
+with st.expander("🔒 Privacy Policy & Terms of Use", expanded=False):
+    st.markdown("""
+**Privacy Policy**
+
+BidAtlas does not collect, store, or share any personal data. All procurement data displayed is sourced directly from publicly available APIs (World Bank, TED Europa) and is not modified beyond translation and formatting. No user accounts, cookies, or tracking mechanisms are used.
+
+Search queries are sent directly from your browser to third-party APIs and are not logged by BidAtlas.
+
+**Terms of Use**
+
+BidAtlas is provided as an internal tool for informational purposes only. It does not constitute procurement advice or a formal tender notification service. Users are responsible for verifying notice details directly with the issuing authority before acting on any information displayed.
+
+Data sourced from World Bank and TED Europa is subject to their respective terms of use:
+- [World Bank Terms](https://www.worldbank.org/en/about/legal/terms-of-use-for-datasets)
+- [TED Europa Terms](https://ted.europa.eu/en/legal-notice)
+
+For questions, contact the tool maintainer.
 """)
 
 # ── Fetch ─────────────────────────────────────────────────────
