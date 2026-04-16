@@ -921,7 +921,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-with st.expander("📦 v1.7 — Click to view version changes", expanded=False):
+with st.expander("📦 v1.6 — Click to view version changes", expanded=False):
     st.markdown("""
 **v1.6** *(current)*
 - Added **CPPP India** as a third live source (Central Public Procurement Portal)
