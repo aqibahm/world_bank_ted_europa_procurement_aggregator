@@ -89,6 +89,8 @@ html, body, [class*="css"] {
 .src-wb   { border-left-color: #005BAA; }
 .src-ted  { border-left-color: #003399; }
 .src-cppp { border-left-color: #FF6B00; }
+.src-adb { border-left-color: #008080; }
+.badge-source-adb { background: #e6fffb; color: #006666; }
 
 .badge {
     display: inline-block;
@@ -864,6 +866,182 @@ def fetch_cppp(keyword: str, rows: int) -> list:
             "amount": "", "link": "https://eprocure.gov.in/cppp/latestactivetendersnew/cpppdata",
             "corrigendum": "",
         }]
+    
+
+# ADD THIS ENTIRE BLOCK BELOW CPPP SECTION (before SIDEBAR)
+
+# ══════════════════════════════════════════════════════════════
+#  SOURCE 4 — ADB (Asian Development Bank)
+# ══════════════════════════════════════════════════════════════
+
+ADB_BASE = "https://www.adb.org/projects/tenders"
+
+def _adb_build_url(page: int) -> str:
+    if page == 0:
+        return f"{ADB_BASE}?terms="
+    return f"{ADB_BASE}?terms=&page={page}"
+
+SCRAPER_KEY = st.secrets.get("SCRAPERAPI_KEY", "")
+
+def _adb_fetch_page(page: int) -> str:
+    url = _adb_build_url(page)
+
+    if not SCRAPER_KEY:
+        raise RuntimeError("Missing SCRAPERAPI_KEY in Streamlit secrets")
+
+    params = {
+        "api_key": SCRAPER_KEY,
+        "url": url,
+        "render": "false"  # faster; ADB doesn’t need JS
+    }
+
+    r = requests.get("https://api.scraperapi.com/", params=params, timeout=60)
+    r.raise_for_status()
+    return r.text
+
+def _adb_detail_field(details_div, label: str) -> str:
+    if not details_div:
+        return ""
+    for p in details_div.find_all("p"):
+        spans = p.find_all("span")
+        if len(spans) >= 2 and label.lower() in spans[0].get_text(strip=True).lower():
+            return spans[1].get_text(strip=True)
+    return ""
+
+def _adb_parse_page(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select("div.item")
+    results = []
+
+    for item in items:
+        title_tag = item.select_one(".item-title a")
+        if not title_tag:
+            continue
+
+        title = title_tag.get_text(strip=True)
+
+        link = title_tag.get("href", "")
+        if link and not link.startswith("http"):
+            link = "https://www.adb.org" + link
+
+        status = ""
+        deadline = ""
+
+        meta = item.select_one(".item-meta")
+        if meta:
+            for div in meta.find_all("div"):
+                spans = div.find_all("span")
+                if len(spans) >= 2:
+                    label = spans[0].get_text(strip=True)
+                    val   = spans[1].get_text(strip=True)
+                    if "Status" in label:
+                        status = val
+                    elif "Deadline" in label:
+                        deadline = val
+
+        # ✅ ROBUST FILTER
+        # ✅ FILTER
+        status_clean = str(status).strip().lower() if status else ""
+        if any(k in status_clean for k in ["award", "closed"]):
+            continue
+
+        summary_div = item.select_one(".item-summary")
+        summary = summary_div.get_text(" ", strip=True) if summary_div else ""
+        parts = [p.strip() for p in summary.split(";")]
+
+        project_id = parts[0] if len(parts) > 0 else ""
+        country    = parts[1] if len(parts) > 1 else ""
+        sector_raw = parts[2] if len(parts) > 2 else ""
+
+        sector = sector_raw.split("Posting")[0].strip() if sector_raw else ""
+
+        details = item.select_one(".item-details")
+
+        agency     = _adb_detail_field(details, "Executing Agency")
+        contractor = _adb_detail_field(details, "Contractor Name")
+        amount     = _adb_detail_field(details, "Total Contract Amount")
+
+        results.append({
+            "source": "ADB",
+            "title": title,
+            "type": status,
+            "country": country,
+            "agency": agency,
+            "deadline": deadline,
+            "amount": amount,
+            "link": link,
+            "project_id": project_id,
+            "borrower": "",
+            "publication_date": "",
+            "sector": sector,
+            "description": contractor,
+            "contact": "",
+            "notice_id": project_id,
+            "publication_number": project_id,
+            "nature": "",
+            "procedure": "",
+            "language": "English",
+            "cpv_codes": "",
+            "nuts_code": "",
+            "award_value": "",
+            "lot_count": "",
+            "buyer_id": "",
+            "corrigendum": "",
+        })
+
+    return results
+
+def fetch_adb(keyword: str, rows: int) -> list:
+    terms     = _expand_keywords(keyword)
+    max_pages = 5 if terms else 2
+    results   = []
+    seen      = set()
+
+    try:
+        for page in range(0, max_pages):
+            html    = _adb_fetch_page(page)
+            notices = _adb_parse_page(html)
+
+            if not notices:
+                break
+
+            for n in notices:
+                uid = n.get("link") or n.get("title")
+                if uid in seen:
+                    continue
+                seen.add(uid)
+
+                if terms:
+                    searchable = " ".join([
+                        n.get("title", ""),
+                        n.get("agency", ""),
+                        n.get("sector", ""),
+                        n.get("description", ""),
+                    ])
+                    if not _fuzzy_match(searchable, terms):
+                        continue
+
+                results.append(n)
+
+            if len(results) >= rows:
+                break
+
+            time.sleep(0.5)
+
+        return results[:rows]
+
+    except Exception as e:
+        return [{
+            "source": "ADB",
+            "title": f"⚠️ Could not fetch ADB: {e}",
+            "type": "Error",
+            "country": "",
+            "agency": "",
+            "deadline": "",
+            "amount": "",
+            "link": ADB_BASE,
+            "corrigendum": "",
+        }]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -884,6 +1062,7 @@ with st.sidebar:
     src_wb   = st.checkbox("🌍 World Bank",  value=True)
     src_ted  = st.checkbox("🇪🇺 TED Europa", value=True)
     src_cppp = st.checkbox("🇮🇳 CPPP India", value=True)
+    src_adb = st.checkbox("🌏 ADB", value=True)
 
     results_limit = st.slider("Results per source", 3, 20, 5, step=1)
     search_btn    = st.button("🔎 Search", use_container_width=True, type="primary")
@@ -897,7 +1076,7 @@ with st.sidebar:
             search_btn = True
 
     st.markdown("---")
-    st.caption("Live data · World Bank · TED Europa · CPPP India")
+    st.caption("Live data · World Bank · ADB · TED Europa · CPPP India")
     st.markdown(
         '<p style="font-size:0.72rem;color:#5a7a9a;margin:0;">'
         'Built by <strong style="color:#003a70;">Aqib Ahmed</strong>.</p>',
@@ -914,15 +1093,18 @@ st.markdown("""
   <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:0.5rem;">
     <div style="min-width:0;flex:1;">
       <h1>🌐 BidAtlas — Global Procurement Tracker</h1>
-      <p>World Bank · TED Europa · CPPP India · Live data · Click ▶ on any card to expand full details</p>
+      <p>World Bank · ADB · TED Europa · CPPP India · Live data · Click ▶ on any card to expand full details</p>
       <p style="margin-top:0.4rem;font-size:0.72rem;opacity:0.55;">Built by <strong style="opacity:0.9;">Aqib Ahmed</strong></p>
     </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-with st.expander("📦 v1.6 — Click to view version changes", expanded=False):
+with st.expander("📦 v1.7 — Click to view version changes", expanded=False):
     st.markdown("""
+**v1.7** *(current)*
+- Added **ADB (Asian Development Bank)** as a fourth live source
+
 **v1.6** *(current)*
 - Added **CPPP India** as a third live source (Central Public Procurement Portal)
 - CPPP tenders fetched via curl + BeautifulSoup, keyword-filtered client-side
@@ -977,6 +1159,7 @@ if "all_notices" not in st.session_state or search_btn:
     if src_wb:   selected_sources.append(("World Bank", fetch_worldbank))
     if src_ted:  selected_sources.append(("TED Europa", fetch_ted))
     if src_cppp: selected_sources.append(("CPPP India", fetch_cppp))
+    if src_adb:  selected_sources.append(("ADB", fetch_adb))
 
     all_notices: list = []
     with st.spinner("Fetching from all sources in parallel…"):
@@ -1023,7 +1206,7 @@ if all_notices:
         all_countries  = sorted(set(n.get("country", "") for n in all_notices if n.get("country")))
         country_filter = st.multiselect("Filter by country", all_countries, placeholder="All countries")
     with col2:
-        source_filter  = st.multiselect("Filter by source", ["World Bank", "TED Europa", "CPPP India"], placeholder="All sources")
+        source_filter  = st.multiselect("Filter by source", ["World Bank", "TED Europa", "CPPP India", "ADB"], placeholder="All sources")
     with col3:
         nature_vals    = sorted(set(n.get("nature", "") for n in all_notices if n.get("nature")))
         nature_filter  = st.multiselect("Filter by nature", nature_vals, placeholder="All types")
