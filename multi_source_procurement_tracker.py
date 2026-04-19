@@ -1088,7 +1088,7 @@ with st.expander("📦 v1.7 — Click to view version changes", expanded=False):
     st.markdown("""
 **v1.7** *(current)*
 - Added **ADB (Asian Development Bank)** as a fourth live source
-- ADB tenders fetched via ScraperAPI; **Active-only** filter applied at parse time
+- ADB tenders fetched; **Active-only** filter applied at parse time
 - Extracts: title, deadline, country, sector, notice type, approval number,
   executing agency, contractor name/address, ADB-financed & total contract amounts
 - Red `🏦 ADB` badge
