@@ -5,17 +5,25 @@ Sources:
   - World Bank (IBRD + IDA)  → JSON API, no key
   - TED Europa (EU)          → REST API v3, no key (RSS fallback)
   - CPPP India               → HTML scrape via curl + BeautifulSoup
+  - ADB (Asian Dev Bank)     → HTML scrape via ScraperAPI
 
 Setup:
     python3 -m venv venv
     source venv/bin/activate
     pip install streamlit requests beautifulsoup4 deep-translator
     streamlit run procurement_tracker.py
+
+ScraperAPI key:
+    Set via environment variable SCRAPERAPI_KEY
+    or in .streamlit/secrets.toml as:
+        SCRAPERAPI_KEY = "your_key_here"
 """
 
 import json
+import os
 import subprocess
 import time
+import re as _re
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -89,8 +97,7 @@ html, body, [class*="css"] {
 .src-wb   { border-left-color: #005BAA; }
 .src-ted  { border-left-color: #003399; }
 .src-cppp { border-left-color: #FF6B00; }
-.src-adb { border-left-color: #008080; }
-.badge-source-adb { background: #e6fffb; color: #006666; }
+.src-adb  { border-left-color: #E31837; }
 
 .badge {
     display: inline-block;
@@ -101,13 +108,14 @@ html, body, [class*="css"] {
     margin-right: 4px;
     margin-bottom: 3px;
 }
-.badge-source    { background: #e8f0fa; color: #003a70; }
-.badge-source-cppp { background: #fff0e6; color: #b34500; }
-.badge-type      { background: #f0f7ee; color: #2d6a4f; }
-.badge-country   { background: #fff8e1; color: #795500; }
-.badge-nature    { background: #fce8ff; color: #6b21a8; }
-.badge-sector    { background: #e0f2fe; color: #075985; }
-.badge-procedure { background: #fdf2f8; color: #9d174d; }
+.badge-source       { background: #e8f0fa; color: #003a70; }
+.badge-source-cppp  { background: #fff0e6; color: #b34500; }
+.badge-source-adb   { background: #fde8ec; color: #8b0010; }
+.badge-type         { background: #f0f7ee; color: #2d6a4f; }
+.badge-country      { background: #fff8e1; color: #795500; }
+.badge-nature       { background: #fce8ff; color: #6b21a8; }
+.badge-sector       { background: #e0f2fe; color: #075985; }
+.badge-procedure    { background: #fdf2f8; color: #9d174d; }
 .badge-deadline-ok     { background: #e8f5e9; color: #1b5e20; }
 .badge-deadline-warn   { background: #fff3e0; color: #b45309; }
 .badge-deadline-urgent { background: #fee2e2; color: #991b1b; }
@@ -169,7 +177,7 @@ def days_until(date_str: str):
     if not date_str or date_str.strip() in ("", "N"):
         return None
     s = date_str.strip()
-    for fmt in ("%Y-%m-%d", "%d-%b-%Y %I:%M %p", "%d-%b-%Y %I:%M%p", "%d-%b-%Y"):
+    for fmt in ("%Y-%m-%d", "%d-%b-%Y %I:%M %p", "%d-%b-%Y %I:%M%p", "%d-%b-%Y", "%d %b %Y"):
         try:
             return (datetime.strptime(s, fmt) - datetime.today()).days
         except Exception:
@@ -183,6 +191,7 @@ def fmt_date(date_str: str) -> str:
         ("%Y-%m-%d",          "%d-%m-%Y"),
         ("%d-%b-%Y %I:%M %p", "%d-%b-%Y %I:%M %p"),
         ("%d-%b-%Y",          "%d-%b-%Y"),
+        ("%d %b %Y",          "%d-%b-%Y"),
     ]:
         try:
             return datetime.strptime(date_str.strip(), fmt).strftime(out)
@@ -205,7 +214,7 @@ def _translate_notice(notice: dict) -> dict:
     return {**notice, "title": _translate(notice.get("title", "")), "type": _translate(notice.get("type", ""))}
 
 def deadline_badge(dl: str) -> str:
-    if not dl or dl.strip() in ("", "N"):
+    if not dl or dl.strip() in ("", "N", "Not available"):
         return ""
     days = days_until(dl)
     label = fmt_date(dl) or dl.strip()
@@ -250,6 +259,7 @@ def render_notice(notice: dict, idx: int):
         "World Bank": ("🌍 World Bank",  "src-wb",   "badge-source"),
         "TED Europa": ("🇪🇺 TED Europa", "src-ted",  "badge-source"),
         "CPPP India": ("🇮🇳 CPPP India", "src-cppp", "badge-source-cppp"),
+        "ADB":        ("🏦 ADB",         "src-adb",  "badge-source-adb"),
     }
     src_label, src_class, src_badge_class = src_labels.get(src, (src, "", "badge-source"))
 
@@ -268,7 +278,11 @@ def render_notice(notice: dict, idx: int):
     lots_line   = f'<div style="font-size:0.78rem;color:#6a7a8a;margin:2px 0;">Lots: {lot_count}</div>' if lot_count and lot_count not in ("", "0") else ""
     cpv_line    = f'<div style="font-size:0.75rem;color:#6a7a8a;margin:2px 0;font-family:monospace;">CPV: {cpv[:120]}</div>' if cpv else ""
     pubnum_line = f'<div style="font-size:0.75rem;color:#9aaabb;margin:2px 0;font-family:monospace;">{pub_num}</div>' if pub_num else ""
-    link_line   = f'<a href="{link}" target="_blank" style="font-size:0.82rem;color:#005BAA;text-decoration:none;">🔗 View notice →</a>' if link and src != "CPPP India" else ""
+    link_line   = (
+        f'<a href="{link}" target="_blank" style="font-size:0.82rem;color:#005BAA;text-decoration:none;">🔗 View notice →</a>'
+        if link and src not in ("CPPP India",)
+        else ""
+    )
 
     card_html = (
         f'<div class="notice-card {src_class}">'
@@ -292,6 +306,9 @@ def render_notice(notice: dict, idx: int):
         buyer_id    = notice.get("buyer_id", "")
         sector      = notice.get("sector", "")
         corrigendum = notice.get("corrigendum", "")
+        contractor  = notice.get("contractor", "")
+        address     = notice.get("address", "")
+        approval_no = notice.get("approval_number", "")
 
         sections = []
         id_rows = "".join(filter(None, [
@@ -309,6 +326,7 @@ def render_notice(notice: dict, idx: int):
             _dr("Notice Type",           ntype),
             _dr("Contract Nature",       nature),
             _dr("Procedure Type",        procedure),
+            _dr("Approval Number",       approval_no),
             _dr("CPV Codes",             cpv),
             _dr("NUTS / Region",         nuts),
             _dr("Sector / Activity",     sector),
@@ -322,24 +340,26 @@ def render_notice(notice: dict, idx: int):
             _dr("Buyer ID / Ref",        buyer_id),
             _dr("Country",               country),
             _dr("Borrower / Client",     borrower),
+            _dr("Contractor Name",       contractor),
+            _dr("Contractor Address",    address),
             _dr("Contact",               contact),
         ]))
         if buyer_rows:
             sections.append(f'<h4>🏛 Buyer / Authority</h4>{buyer_rows}')
 
         fin_rows = "".join(filter(None, [
-            _dr("Estimated Value",       amount),
-            _dr("Award Value",           award_val),
-            _dr("Project ID",            project_id),
+            _dr("Estimated Value",                  amount),
+            _dr("Total Contract Amount (US$)",      award_val),
+            _dr("Project ID",                       project_id),
         ]))
         if fin_rows:
             sections.append(f'<h4>💰 Financials</h4>{fin_rows}')
 
         if description and len(str(description).strip()) > 5:
-            desc_text = str(description)[:900] + ("…" if len(str(description)) > 900 else "")
+            desc_text = str(description)[:900] + ("..." if len(str(description)) > 900 else "")
             sections.append(f'<h4>📝 Description</h4><div style="color:#1a2a40;line-height:1.7;">{desc_text}</div>')
 
-        if link and src != "CPPP India":
+        if link and src not in ("CPPP India",):
             sections.append(f'<h4>🔗 Source Link</h4><a href="{link}" target="_blank" style="color:#005BAA;">{link}</a>')
 
         if sections:
@@ -349,11 +369,9 @@ def render_notice(notice: dict, idx: int):
 
 
 # ══════════════════════════════════════════════════════════════
-#  SEARCH HELPERS — keyword preprocessing
+#  SEARCH HELPERS
 # ══════════════════════════════════════════════════════════════
 
-# Common procurement synonyms — if the user types any of these,
-# we also search for the alternatives to widen the net.
 SYNONYM_MAP = {
     "it":           ["information technology", "software", "digital", "ICT"],
     "ict":          ["information technology", "software", "digital", "IT"],
@@ -367,31 +385,18 @@ SYNONYM_MAP = {
     "supply":       ["procurement", "purchase", "goods"],
 }
 
-def _expand_keywords(keyword: str) -> list[str]:
-    """
-    Return a list of search terms to try, ordered by specificity.
-    - Multi-word phrase → try phrase first, then individual significant words
-    - Single word → try word + any synonyms
-    - Empty → return []
-    """
+def _expand_keywords(keyword: str) -> list:
     kw = keyword.strip().lower()
     if not kw:
         return []
-
-    terms = [kw]  # always try the original first
-
-    # Add synonyms for single-word queries
+    terms = [kw]
     if " " not in kw and kw in SYNONYM_MAP:
         terms.extend(SYNONYM_MAP[kw])
-
-    # For multi-word phrases, also try each significant word individually
     if " " in kw:
         stop_words = {"and", "or", "the", "of", "for", "in", "to", "a", "an",
                       "with", "by", "at", "from", "on", "is", "are", "be"}
         words = [w for w in kw.split() if w not in stop_words and len(w) > 2]
         terms.extend(words)
-
-    # Deduplicate preserving order
     seen, unique = set(), []
     for t in terms:
         if t not in seen:
@@ -399,18 +404,12 @@ def _expand_keywords(keyword: str) -> list[str]:
             unique.append(t)
     return unique
 
-
-def _fuzzy_match(text: str, keywords: list[str]) -> bool:
-    """
-    Return True if any keyword matches the text.
-    Handles partial matches and simple stemming (strips common suffixes).
-    """
+def _fuzzy_match(text: str, keywords: list) -> bool:
     text_lower = text.lower()
     for kw in keywords:
         kw = kw.lower()
         if kw in text_lower:
             return True
-        # Simple stem: strip trailing s, ing, ed, tion, ment
         for suffix in ("tion", "ment", "ing", "ed", "s"):
             if kw.endswith(suffix):
                 stem = kw[:-len(suffix)]
@@ -424,19 +423,14 @@ def _fuzzy_match(text: str, keywords: list[str]) -> bool:
 # ══════════════════════════════════════════════════════════════
 
 def fetch_worldbank(keyword: str, rows: int) -> list:
-    # World Bank supports native search — fetch up to 50 server-side,
-    # then return the top `rows` after local relevance re-check.
     fetch_limit = max(rows, 50)
     terms       = _expand_keywords(keyword)
     all_notices = []
     seen_ids    = set()
 
-    def _fetch(qterm: str, limit: int) -> list:
-        params = {
-            "format": "json", "apilang": "en", "srce": "both",
-            "rows": limit, "os": 0,
-            "srt": "submission_deadline_date", "order": "desc",
-        }
+    def _fetch(qterm, limit):
+        params = {"format": "json", "apilang": "en", "srce": "both",
+                  "rows": limit, "os": 0, "srt": "submission_deadline_date", "order": "desc"}
         if qterm:
             params["qterm"] = qterm
         r = requests.get("https://search.worldbank.org/api/v2/procnotices", params=params, timeout=15)
@@ -451,32 +445,33 @@ def fetch_worldbank(keyword: str, rows: int) -> list:
                     return c
         return notices
 
-    def _to_notice(n: dict) -> dict:
+    def _to_notice(n):
         nid  = n.get("id", "")
         link = n.get("url") or (f"https://projects.worldbank.org/en/projects-operations/procurement-detail/{nid}" if nid else "")
-        amount_raw = n.get("contract_amount_usd") or n.get("totalcontract") or n.get("totalContract") or ""
+        amount_raw = n.get("contract_amount_usd") or n.get("totalcontract") or ""
         try:
             amount_str = f"USD {float(amount_raw):,.0f}" if amount_raw else ""
         except (ValueError, TypeError):
             amount_str = str(amount_raw) if amount_raw else ""
-        contact_parts = list(filter(None, [n.get("contact_name", ""), n.get("contact_email", ""), n.get("contact_phone", "")]))
+        contact_parts = list(filter(None, [n.get("contact_name", ""), n.get("contact_email", "")]))
         return {
-            "source": "World Bank", "title": n.get("project_name") or n.get("noticeTitle") or "Untitled",
-            "type": n.get("notice_type") or n.get("noticeType", ""), "country": n.get("project_ctry_name") or n.get("countryname", ""),
-            "agency": n.get("contact_agency") or n.get("borrower", ""),
-            "deadline": (n.get("submission_deadline_date") or n.get("deadlineDate") or "")[:10],
+            "source": "World Bank", "title": n.get("project_name") or "Untitled",
+            "type": n.get("notice_type", ""), "country": n.get("project_ctry_name", ""),
+            "agency": n.get("contact_agency", ""),
+            "deadline": (n.get("submission_deadline_date") or "")[:10],
             "amount": amount_str, "link": link, "notice_id": nid, "project_id": n.get("project_id", ""),
-            "borrower": n.get("borrower", ""), "publication_date": (n.get("publish_date") or n.get("publishDate") or "")[:10],
-            "sector": n.get("sector") or n.get("majorsector_exact", ""),
-            "description": n.get("short_description") or n.get("noticeText", ""),
-            "contact": " · ".join(contact_parts), "procedure": n.get("procurement_method") or n.get("procMethod", ""),
+            "borrower": n.get("borrower", ""),
+            "publication_date": (n.get("publish_date") or "")[:10],
+            "sector": n.get("sector", ""),
+            "description": n.get("short_description", ""),
+            "contact": " · ".join(contact_parts), "procedure": n.get("procurement_method", ""),
             "nature": n.get("procurement_group", ""), "language": n.get("lang", ""),
             "publication_number": nid, "buyer_id": n.get("contact_agency", ""),
             "cpv_codes": "", "nuts_code": "", "award_value": "", "lot_count": "", "corrigendum": "",
+            "contractor": "", "address": "", "approval_number": "",
         }
 
     try:
-        # Try each expanded term; collect unique results
         query_terms = terms if terms else [""]
         for term in query_terms:
             for raw in _fetch(term, fetch_limit):
@@ -488,14 +483,10 @@ def fetch_worldbank(keyword: str, rows: int) -> list:
                 all_notices.append(_to_notice(raw))
             if len(all_notices) >= fetch_limit:
                 break
-
-        # If we searched with a keyword, keep only fuzzy-matched results
         if terms:
             all_notices = [n for n in all_notices
                            if _fuzzy_match(n["title"] + " " + n.get("description", "") + " " + n.get("sector", ""), terms)]
-
         return all_notices[:rows]
-
     except Exception as e:
         return [{"source": "World Bank", "title": f"⚠️ Error: {e}", "type": "", "country": "", "agency": "",
                  "deadline": "", "amount": "", "link": "", "corrigendum": ""}]
@@ -512,7 +503,7 @@ TED_FIELDS_ENRICHED = TED_FIELDS_CORE + [
     "buyer-legal-type", "buyer-activity", "buyer-id", "language", "notice-links",
 ]
 
-def _fv(n: dict, k: str) -> str:
+def _fv(n, k):
     v = n.get(k, "")
     if not v:
         return ""
@@ -529,33 +520,23 @@ def _fv(n: dict, k: str) -> str:
     return str(v)
 
 def fetch_ted(keyword: str, rows: int) -> list:
-    terms    = _expand_keywords(keyword)
-    all_notices: list = []
-    seen_pubs: set    = set()
+    terms       = _expand_keywords(keyword)
+    all_notices = []
+    seen_pubs   = set()
+    PER_PAGE    = 10
+    MAX_PAGES   = 3
 
-    # TED API: fetch up to 10 per term across expanded terms,
-    # paginate up to 3 pages per term to maximise coverage.
-    PER_PAGE   = 10
-    MAX_PAGES  = 3
-
-    def _build_payload(query: str, fields: list, page: int) -> dict:
+    def _build_payload(query, fields, page):
         return {"query": query, "fields": fields, "page": page, "limit": PER_PAGE,
                 "scope": "ACTIVE", "checkQuerySyntax": False, "paginationMode": "PAGE_NUMBER"}
 
-    def _post(payload: dict):
+    def _post(payload):
         return requests.post(
             "https://api.ted.europa.eu/v3/notices/search", json=payload,
             headers={"Content-Type": "application/json", "Accept": "application/json"}, timeout=15,
         )
 
-    def _is_valid_notice(n: dict) -> bool:
-        title = n.get("title", "")
-        if not title or title == "Untitled":
-            return False
-        error_markers = ["Error 500", "Server Error", "That's an error", "Please try again", "502", "503", "504"]
-        return not any(m.lower() in title.lower() for m in error_markers)
-
-    def _parse_notices(notices: list, enriched: bool) -> list:
+    def _parse_notices(notices, enriched):
         results = []
         for n in notices:
             pub  = _fv(n, "publication-number")
@@ -579,7 +560,7 @@ def fetch_ted(keyword: str, rows: int) -> list:
                         code   = str(c.get("code", ""))
                         name_d = c.get("name", {})
                         name   = (name_d.get("ENG") or name_d.get("FRA") or "") if isinstance(name_d, dict) else str(name_d)
-                        cpv_str += f"{code} {name} · ".strip()
+                        cpv_str += f"{code} {name} · "
             nuts_str = ""
             if enriched:
                 nuts_str = ", ".join(
@@ -587,8 +568,11 @@ def fetch_ted(keyword: str, rows: int) -> list:
                     (n.get("place-of-performance", []) if isinstance(n.get("place-of-performance"), list) else [])
                     if isinstance(p, dict) and p.get("nuts")
                 )
+            title = _fv(n, "notice-title") or "Untitled"
+            if not title or title == "Untitled":
+                continue
             results.append({
-                "source": "TED Europa", "title": _fv(n, "notice-title") or "Untitled",
+                "source": "TED Europa", "title": title,
                 "type": _fv(n, "notice-type"), "country": _fv(n, "buyer-country"),
                 "agency": _fv(n, "buyer-name"),
                 "deadline": str(_fv(n, "deadline-receipt-request"))[:10] if enriched else "",
@@ -604,12 +588,11 @@ def fetch_ted(keyword: str, rows: int) -> list:
                 "sector": _fv(n, "buyer-activity") if enriched else "",
                 "description": "", "notice_id": pub, "project_id": "",
                 "borrower": _fv(n, "buyer-legal-type") if enriched else "",
-                "contact": "", "corrigendum": "",
+                "contact": "", "corrigendum": "", "contractor": "", "address": "", "approval_number": "",
             })
-        translated = [_translate_notice(n) for n in results]
-        return [n for n in translated if _is_valid_notice(n)]
+        return [_translate_notice(n) for n in results]
 
-    def _fetch_term(term: str) -> None:
+    def _fetch_term(term):
         kw    = term.strip()
         query = "notice-type IN (cn-standard, cn-social)" if not kw else (f'FT~"{kw}"' if " " in kw else f"FT~{kw}")
         for page in range(1, MAX_PAGES + 1):
@@ -619,15 +602,14 @@ def fetch_ted(keyword: str, rows: int) -> list:
                     notices = r.json().get("notices", [])
                     if not notices:
                         break
-                    all_notices.extend(_parse_notices(notices, enriched=True))
+                    all_notices.extend(_parse_notices(notices, True))
                 elif r.status_code in (400, 422, 500):
-                    # Retry with core fields
                     r2 = _post(_build_payload(query, TED_FIELDS_CORE, page))
                     if r2.status_code == 200:
                         notices = r2.json().get("notices", [])
                         if not notices:
                             break
-                        all_notices.extend(_parse_notices(notices, enriched=False))
+                        all_notices.extend(_parse_notices(notices, False))
                     else:
                         break
                 else:
@@ -638,34 +620,28 @@ def fetch_ted(keyword: str, rows: int) -> list:
                 break
 
     try:
-        query_terms = terms if terms else [""]
-        for term in query_terms:
+        for term in (terms if terms else [""]):
             _fetch_term(term)
             if len(all_notices) >= rows * 2:
                 break
-
-        # Apply fuzzy filter if keyword given
         if terms:
             all_notices = [n for n in all_notices
                            if _fuzzy_match(n["title"] + " " + n.get("description", "") + " " + n.get("sector", ""), terms)]
-
         return all_notices[:rows] if all_notices else _fetch_ted_rss(keyword, rows)
-
     except Exception:
         return _fetch_ted_rss(keyword, rows)
 
 def _rss_text(block, tag):
-    import re, html
-    m = re.search(rf"<{tag}[^>]*>\s*<!\[CDATA\[(.*?)\]\]>", block, re.S)
+    import html
+    m = _re.search(rf"<{tag}[^>]*>\s*<!\[CDATA\[(.*?)\]\]>", block, _re.S)
     if m:
         return m.group(1).strip()
-    m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", block, re.S)
+    m = _re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", block, _re.S)
     if m:
         return html.unescape(m.group(1).strip())
     return ""
 
 def _fetch_ted_rss(keyword, rows):
-    import re
     kw = keyword.strip().lower()
     headers = {"User-Agent": "Mozilla/5.0 (compatible; BidAtlas/1.0)"}
     candidate_urls = []
@@ -681,7 +657,7 @@ def _fetch_ted_rss(keyword, rows):
             raw_text = r.content.decode("utf-8", errors="replace")
             if "<item" not in raw_text:
                 last_err = "No items"; continue
-            item_blocks = re.findall(r"<item[^>]*>(.*?)</item>", raw_text, re.S)
+            item_blocks = _re.findall(r"<item[^>]*>(.*?)</item>", raw_text, _re.S)
             results = []
             for block in item_blocks:
                 title   = _rss_text(block, "title") or "Untitled"
@@ -703,6 +679,7 @@ def _fetch_ted_rss(keyword, rows):
                     "project_id": "", "borrower": "", "contact": "", "description": desc[:500],
                     "notice_id": "", "language": "", "cpv_codes": "", "nuts_code": "",
                     "procedure": "", "award_value": "", "lot_count": "", "buyer_id": "", "corrigendum": "",
+                    "contractor": "", "address": "", "approval_number": "",
                 })
                 if len(results) >= rows:
                     break
@@ -722,7 +699,6 @@ def _fetch_ted_rss(keyword, rows):
 # ══════════════════════════════════════════════════════════════
 
 CPPP_BASE = "https://eprocure.gov.in/cppp/latestactivetendersnew/cpppdata"
-
 CPPP_CURL_HEADERS = [
     "-A", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -744,269 +720,270 @@ def _cppp_fetch_page(page: int) -> str:
         raise RuntimeError(result.stderr.decode())
     return result.stdout.decode("utf-8", errors="replace")
 
-def _cppp_parse_page(html: str, keyword: str) -> list[dict]:
+def _cppp_parse_page(html: str, keyword: str) -> list:
     soup  = BeautifulSoup(html, "html.parser")
     table = soup.find("table", {"id": "table"})
     if not table:
         return []
-
     kw = keyword.strip().lower()
     results = []
-
     for tbody in table.find_all("tbody"):
         cells = tbody.find_all("td")
         if len(cells) < 7:
             continue
-
-        title_cell = cells[4]
-        link_tag   = title_cell.find("a")
-        title      = link_tag.get_text(strip=True) if link_tag else title_cell.get_text(strip=True)
-        full_text  = title_cell.get_text(separator="|", strip=True)
-        parts      = full_text.split("|")
-        ref_no     = parts[1].strip() if len(parts) > 1 else ""
-
-        # CPPP detail URLs embed a session hash + timestamp that expire immediately
-        # after page load — no stable deep link can be constructed.
-        url = ""
-        org        = cells[5].get_text(strip=True)
+        title_cell  = cells[4]
+        link_tag    = title_cell.find("a")
+        title       = link_tag.get_text(strip=True) if link_tag else title_cell.get_text(strip=True)
+        full_text   = title_cell.get_text(separator="|", strip=True)
+        parts       = full_text.split("|")
+        ref_no      = parts[1].strip() if len(parts) > 1 else ""
+        org         = cells[5].get_text(strip=True)
         corrigendum = cells[6].get_text(strip=True)
-        pub_date   = cells[1].get_text(strip=True)
-        bid_close  = cells[2].get_text(strip=True)
-        open_date  = cells[3].get_text(strip=True)
-
-        # Apply keyword filter client-side if provided
+        pub_date    = cells[1].get_text(strip=True)
+        bid_close   = cells[2].get_text(strip=True)
+        open_date   = cells[3].get_text(strip=True)
         if kw and kw not in title.lower() and kw not in org.lower() and kw not in ref_no.lower():
             continue
-
         results.append({
-            "source":           "CPPP India",
-            "title":            title,
-            "type":             "Active Tender",
-            "country":          "India",
-            "agency":           org,
-            "deadline":         bid_close,
-            "amount":           "",
-            "link":             url,
-            "notice_id":        ref_no,
-            "publication_date": pub_date,
-            "publication_number": ref_no,
-            "project_id":       "",
-            "borrower":         "",
-            "contact":          "",
-            "description":      f"Tender Opening Date: {open_date}",
-            "sector":           "",
-            "nature":           "",
-            "procedure":        "",
-            "language":         "English",
-            "cpv_codes":        "",
-            "nuts_code":        "",
-            "award_value":      "",
-            "lot_count":        "",
-            "buyer_id":         "",
-            "corrigendum":      corrigendum if corrigendum != "--" else "",
+            "source": "CPPP India", "title": title, "type": "Active Tender",
+            "country": "India", "agency": org, "deadline": bid_close, "amount": "", "link": "",
+            "notice_id": ref_no, "publication_date": pub_date, "publication_number": ref_no,
+            "project_id": "", "borrower": "", "contact": "",
+            "description": f"Tender Opening Date: {open_date}", "sector": "", "nature": "",
+            "procedure": "", "language": "English", "cpv_codes": "", "nuts_code": "",
+            "award_value": "", "lot_count": "", "buyer_id": "",
+            "corrigendum": corrigendum if corrigendum != "--" else "",
+            "contractor": "", "address": "", "approval_number": "",
         })
-
     return results
 
 def fetch_cppp(keyword: str, rows: int) -> list:
-    """
-    Fetches CPPP tenders. With a keyword, scans up to 20 pages using
-    fuzzy multi-term matching. Without a keyword, returns the first 2 pages.
-    """
     terms     = _expand_keywords(keyword)
     max_pages = 20 if terms else 2
     results   = []
     seen      = set()
-
     try:
         for page in range(1, max_pages + 1):
             html    = _cppp_fetch_page(page)
-            # Parse without keyword filter first to get all rows
             notices = _cppp_parse_page(html, "")
-
             if not notices:
-                break  # empty page means we've gone past the end
-
+                break
             for n in notices:
-                uid = n.get("ref_no") or n.get("title", "")
+                uid = n.get("notice_id", "") or n.get("title", "")
                 if uid in seen:
                     continue
                 seen.add(uid)
-
-                # Apply fuzzy match if keyword given
                 if terms:
-                    searchable = " ".join([
-                        n.get("title", ""),
-                        n.get("agency", ""),
-                        n.get("notice_id", ""),
-                        n.get("description", ""),
-                    ])
+                    searchable = " ".join([n.get("title", ""), n.get("agency", ""),
+                                           n.get("notice_id", ""), n.get("description", "")])
                     if not _fuzzy_match(searchable, terms):
                         continue
-
                 results.append(n)
-
-            # Stop early if we have enough
             if len(results) >= rows:
                 break
-
             time.sleep(0.5)
-
-        # If keyword search found nothing, fall back to latest unfiltered
         if not results and terms:
             html    = _cppp_fetch_page(1)
             results = _cppp_parse_page(html, "")
-
         return results[:rows]
-
     except Exception as e:
-        return [{
-            "source": "CPPP India", "title": f"⚠️ Could not fetch CPPP: {e}",
-            "type": "Error", "country": "India", "agency": "", "deadline": "",
-            "amount": "", "link": "https://eprocure.gov.in/cppp/latestactivetendersnew/cpppdata",
-            "corrigendum": "",
-        }]
-    
+        return [{"source": "CPPP India", "title": f"⚠️ Could not fetch CPPP: {e}",
+                 "type": "Error", "country": "India", "agency": "", "deadline": "",
+                 "amount": "", "link": "https://eprocure.gov.in/cppp/latestactivetendersnew/cpppdata",
+                 "corrigendum": ""}]
 
-# ADD THIS ENTIRE BLOCK BELOW CPPP SECTION (before SIDEBAR)
 
 # ══════════════════════════════════════════════════════════════
 #  SOURCE 4 — ADB (Asian Development Bank)
+#
+#  • Fetches https://www.adb.org/projects/tenders via ScraperAPI
+#  • ONLY keeps notices where status == "Active"  (span.Active present)
+#  • Paginates: page 1 → ?terms=<kw>
+#                page N → ?terms=<kw>&page=<N-1>
+#  • ScraperAPI key from st.secrets["SCRAPERAPI_KEY"] or env SCRAPERAPI_KEY
 # ══════════════════════════════════════════════════════════════
 
-ADB_BASE = "https://www.adb.org/projects/tenders"
+ADB_BASE    = "https://www.adb.org/projects/tenders"
+ADB_SCRAPER = "https://api.scraperapi.com/"
 
-def _adb_build_url(page: int) -> str:
-    if page == 0:
-        return f"{ADB_BASE}?terms="
-    return f"{ADB_BASE}?terms=&page={page}"
+def _get_scraper_api_key() -> str:
+    try:
+        return st.secrets["SCRAPERAPI_KEY"]
+    except Exception:
+        pass
+    return os.environ.get("SCRAPERAPI_KEY", "")
 
-SCRAPER_KEY = st.secrets.get("SCRAPERAPI_KEY", "")
-
-def _adb_fetch_page(page: int) -> str:
-    url = _adb_build_url(page)
-
-    if not SCRAPER_KEY:
-        raise RuntimeError("Missing SCRAPERAPI_KEY in Streamlit secrets")
-
-    params = {
-        "api_key": SCRAPER_KEY,
-        "url": url,
-        "render": "false"  # faster; ADB doesn’t need JS
-    }
-
-    r = requests.get("https://api.scraperapi.com/", params=params, timeout=60)
+def _adb_fetch_page(page_num: int, keyword: str, api_key: str) -> str:
+    """Fetch one ADB tenders page via ScraperAPI."""
+    kw_encoded = requests.utils.quote(keyword.strip())
+    if page_num == 1:
+        target_url = f"{ADB_BASE}?terms={kw_encoded}"
+    else:
+        target_url = f"{ADB_BASE}?terms={kw_encoded}&page={page_num - 1}"
+    params = {"api_key": api_key, "url": target_url}
+    r = requests.get(ADB_SCRAPER, params=params, timeout=60)
     r.raise_for_status()
     return r.text
 
-def _adb_detail_field(details_div, label: str) -> str:
-    if not details_div:
-        return ""
-    for p in details_div.find_all("p"):
-        spans = p.find_all("span")
-        if len(spans) >= 2 and label.lower() in spans[0].get_text(strip=True).lower():
-            return spans[1].get_text(strip=True)
-    return ""
+def _adb_parse_page(html: str) -> list:
+    """
+    Parse ADB tenders page HTML.
+    Returns ONLY Active notices.
 
-def _adb_parse_page(html: str) -> list[dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    items = soup.select("div.item")
+    Selectors used:
+      div.item                                 → one card
+      div.item-meta span.Active               → status gate
+      div.item-meta [span after "Deadline:"]  → deadline text
+      div.item-title a                         → title + href
+      div.item-summary                         → project_id; country; sector; date
+      div.item-details p span (pairs)         → notice type, approval no,
+                                                agency, contractor, address, amounts
+    """
+    soup    = BeautifulSoup(html, "html.parser")
     results = []
 
-    for item in items:
-        title_tag = item.select_one(".item-title a")
-        if not title_tag:
+    for item in soup.select("div.item"):
+        # ── Only Active ────────────────────────────────────────
+        meta_div = item.select_one("div.item-meta")
+        if not meta_div:
+            continue
+        if not meta_div.select_one("span.Active"):
             continue
 
-        title = title_tag.get_text(strip=True)
+        # ── Deadline ───────────────────────────────────────────
+        deadline  = ""
+        meta_spans = meta_div.find_all("span")
+        for i, sp in enumerate(meta_spans):
+            if sp.get_text(strip=True).lower() == "deadline:":
+                if i + 1 < len(meta_spans):
+                    deadline = meta_spans[i + 1].get_text(strip=True)
+                break
 
-        link = title_tag.get("href", "")
-        if link and not link.startswith("http"):
-            link = "https://www.adb.org" + link
+        # ── Title + link ───────────────────────────────────────
+        title_tag = item.select_one("div.item-title a")
+        title     = title_tag.get_text(strip=True) if title_tag else "Untitled"
+        rel_href  = title_tag["href"] if title_tag and title_tag.has_attr("href") else ""
+        link      = f"https://www.adb.org{rel_href}" if rel_href else ""
 
-        status = ""
-        deadline = ""
+        # ── Summary line ───────────────────────────────────────
+        # e.g. "59329-001; Azerbaijan; Transport; Posting date: 17 Apr 2026"
+        summary_div = item.select_one("div.item-summary")
+        summary_txt = summary_div.get_text(separator=" ", strip=True) if summary_div else ""
+        s_parts     = [p.strip() for p in summary_txt.split(";")]
+        project_id  = s_parts[0] if len(s_parts) > 0 else ""
+        country     = s_parts[1] if len(s_parts) > 1 else ""
+        sector      = s_parts[2] if len(s_parts) > 2 else ""
+        date_part   = " ".join(s_parts[3:]) if len(s_parts) > 3 else ""
 
-        meta = item.select_one(".item-meta")
-        if meta:
-            for div in meta.find_all("div"):
-                spans = div.find_all("span")
-                if len(spans) >= 2:
-                    label = spans[0].get_text(strip=True)
-                    val   = spans[1].get_text(strip=True)
-                    if "Status" in label:
-                        status = val
-                    elif "Deadline" in label:
-                        deadline = val
+        posting_date = ""
+        m = _re.search(r"[Pp]osting\s+date[:\s]+(.+?)$", date_part)
+        if m:
+            posting_date = m.group(1).strip()
 
-        # ✅ ROBUST FILTER
-        # ✅ FILTER
-        status_clean = str(status).strip().lower() if status else ""
-        if any(k in status_clean for k in ["award", "closed"]):
-            continue
+        # ── Detail key-value pairs ─────────────────────────────
+        details: dict = {}
+        for p_tag in item.select("div.item-details p"):
+            spans = p_tag.find_all("span")
+            if len(spans) >= 2:
+                k = spans[0].get_text(strip=True).rstrip(":").strip()
+                v = spans[1].get_text(strip=True)
+                details[k] = v
 
-        summary_div = item.select_one(".item-summary")
-        summary = summary_div.get_text(" ", strip=True) if summary_div else ""
-        parts = [p.strip() for p in summary.split(";")]
+        notice_type   = details.get("Notice Type", "")
+        approval_no   = details.get("Approval Number", "")
+        agency        = details.get("Executing Agency", "")
+        contractor    = details.get("Contractor Name", "")
+        address       = details.get("Address", "")
+        total_amt_str = details.get("Total Contract Amount (US$)", "")
+        adb_amt_str   = details.get("Contract Amount Financed by ADB (US$)", "")
 
-        project_id = parts[0] if len(parts) > 0 else ""
-        country    = parts[1] if len(parts) > 1 else ""
-        sector_raw = parts[2] if len(parts) > 2 else ""
+        def _fmt_usd(v):
+            if not v:
+                return ""
+            try:
+                return f"USD {float(v.replace(',', '')):,.2f}"
+            except (ValueError, TypeError):
+                return v
 
-        sector = sector_raw.split("Posting")[0].strip() if sector_raw else ""
-
-        details = item.select_one(".item-details")
-
-        agency     = _adb_detail_field(details, "Executing Agency")
-        contractor = _adb_detail_field(details, "Contractor Name")
-        amount     = _adb_detail_field(details, "Total Contract Amount")
+        total_amount = _fmt_usd(total_amt_str)
+        adb_amount   = _fmt_usd(adb_amt_str)
 
         results.append({
-            "source": "ADB",
-            "title": title,
-            "type": status,
-            "country": country,
-            "agency": agency,
-            "deadline": deadline,
-            "amount": amount,
-            "link": link,
-            "project_id": project_id,
-            "borrower": "",
-            "publication_date": "",
-            "sector": sector,
-            "description": contractor,
-            "contact": "",
-            "notice_id": project_id,
+            "source":             "ADB",
+            "title":              title,
+            "type":               notice_type,
+            "country":            country.strip(),
+            "agency":             agency,
+            "deadline":           deadline,
+            # Display ADB-financed amount if available, else total
+            "amount":             adb_amount or total_amount,
+            "link":               link,
+            "notice_id":          project_id,
+            "project_id":         project_id,
+            "publication_date":   posting_date,
+            "sector":             sector.strip(),
+            "nature":             "",
+            "procedure":          "",
+            "language":           "English",
+            "cpv_codes":          "",
+            "nuts_code":          "",
+            # award_value = total contract amount (if different from ADB share)
+            "award_value":        total_amount if total_amount != adb_amount else "",
+            "lot_count":          "",
+            "buyer_id":           "",
+            "borrower":           "",
+            "contact":            "",
+            "corrigendum":        "",
+            "contractor":         contractor,
+            "address":            address,
+            "approval_number":    approval_no,
+            "description":        (
+                f"Sector: {sector.strip()}. "
+                + (f"Posting date: {posting_date}. " if posting_date else "")
+                + (f"Approval: {approval_no}." if approval_no else "")
+            ).strip(),
             "publication_number": project_id,
-            "nature": "",
-            "procedure": "",
-            "language": "English",
-            "cpv_codes": "",
-            "nuts_code": "",
-            "award_value": "",
-            "lot_count": "",
-            "buyer_id": "",
-            "corrigendum": "",
         })
 
     return results
 
 def fetch_adb(keyword: str, rows: int) -> list:
+    """
+    Fetch Active-only ADB tenders via ScraperAPI.
+    No keyword → up to 5 pages.
+    With keyword → up to 15 pages with fuzzy matching.
+    """
+    api_key = _get_scraper_api_key()
+    if not api_key:
+        return [{
+            "source": "ADB",
+            "title": "⚠️ ScraperAPI key not configured.",
+            "type": "Config Error", "country": "", "agency": "", "deadline": "", "amount": "",
+            "link": "https://www.adb.org/projects/tenders",
+            "description": (
+                "Add your ScraperAPI key to .streamlit/secrets.toml as:\n"
+                "  SCRAPERAPI_KEY = \"your_key_here\"\n"
+                "or set the SCRAPERAPI_KEY environment variable. "
+                "Free keys available at https://www.scraperapi.com"
+            ),
+            "corrigendum": "", "contractor": "", "address": "", "approval_number": "",
+        }]
+
     terms     = _expand_keywords(keyword)
-    max_pages = 5 if terms else 2
+    max_pages = 15 if terms else 5
     results   = []
     seen      = set()
 
     try:
-        for page in range(0, max_pages):
-            html    = _adb_fetch_page(page)
+        for page_num in range(1, max_pages + 1):
+            html    = _adb_fetch_page(page_num, keyword, api_key)
             notices = _adb_parse_page(html)
 
             if not notices:
-                break
+                break  # empty page → past the end
 
             for n in notices:
-                uid = n.get("link") or n.get("title")
+                uid = n.get("project_id", "") + "|" + n.get("title", "")
                 if uid in seen:
                     continue
                 seen.add(uid)
@@ -1014,9 +991,11 @@ def fetch_adb(keyword: str, rows: int) -> list:
                 if terms:
                     searchable = " ".join([
                         n.get("title", ""),
-                        n.get("agency", ""),
                         n.get("sector", ""),
+                        n.get("country", ""),
+                        n.get("agency", ""),
                         n.get("description", ""),
+                        n.get("type", ""),
                     ])
                     if not _fuzzy_match(searchable, terms):
                         continue
@@ -1026,21 +1005,26 @@ def fetch_adb(keyword: str, rows: int) -> list:
             if len(results) >= rows:
                 break
 
-            time.sleep(0.5)
+            time.sleep(0.3)  # polite delay between ScraperAPI calls
+
+        if not results and not terms:
+            return [{
+                "source": "ADB", "title": "ℹ️ No Active ADB tenders found.",
+                "type": "Info", "country": "", "agency": "", "deadline": "", "amount": "",
+                "link": "https://www.adb.org/projects/tenders",
+                "description": "ADB returned no Active tenders on page 1. Try the site directly.",
+                "corrigendum": "", "contractor": "", "address": "", "approval_number": "",
+            }]
 
         return results[:rows]
 
     except Exception as e:
         return [{
-            "source": "ADB",
-            "title": f"⚠️ Could not fetch ADB: {e}",
-            "type": "Error",
-            "country": "",
-            "agency": "",
-            "deadline": "",
-            "amount": "",
-            "link": ADB_BASE,
-            "corrigendum": "",
+            "source": "ADB", "title": f"⚠️ Could not fetch ADB tenders: {e}",
+            "type": "Error", "country": "", "agency": "", "deadline": "", "amount": "",
+            "link": "https://www.adb.org/projects/tenders",
+            "description": str(e),
+            "corrigendum": "", "contractor": "", "address": "", "approval_number": "",
         }]
 
 
@@ -1054,7 +1038,7 @@ with st.sidebar:
 
     keyword = st.text_input(
         "Keyword", value="",
-        placeholder="climate, governance, health…",
+        placeholder="climate, governance, health...",
         help="Leave blank to browse latest notices",
     )
 
@@ -1062,7 +1046,7 @@ with st.sidebar:
     src_wb   = st.checkbox("🌍 World Bank",  value=True)
     src_ted  = st.checkbox("🇪🇺 TED Europa", value=True)
     src_cppp = st.checkbox("🇮🇳 CPPP India", value=True)
-    src_adb = st.checkbox("🌏 ADB", value=True)
+    src_adb  = st.checkbox("🏦 ADB",         value=True)
 
     results_limit = st.slider("Results per source", 3, 20, 5, step=1)
     search_btn    = st.button("🔎 Search", use_container_width=True, type="primary")
@@ -1076,7 +1060,7 @@ with st.sidebar:
             search_btn = True
 
     st.markdown("---")
-    st.caption("Live data · World Bank · ADB · TED Europa · CPPP India")
+    st.caption("Live data · World Bank · TED Europa · CPPP India · ADB")
     st.markdown(
         '<p style="font-size:0.72rem;color:#5a7a9a;margin:0;">'
         'Built by <strong style="color:#003a70;">Aqib Ahmed</strong>.</p>',
@@ -1093,7 +1077,7 @@ st.markdown("""
   <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:0.5rem;">
     <div style="min-width:0;flex:1;">
       <h1>🌐 BidAtlas — Global Procurement Tracker</h1>
-      <p>World Bank · ADB · TED Europa · CPPP India · Live data · Click ▶ on any card to expand full details</p>
+      <p>World Bank · TED Europa · CPPP India · ADB · Live data · Click ▶ on any card to expand full details</p>
       <p style="margin-top:0.4rem;font-size:0.72rem;opacity:0.55;">Built by <strong style="opacity:0.9;">Aqib Ahmed</strong></p>
     </div>
   </div>
@@ -1104,52 +1088,31 @@ with st.expander("📦 v1.7 — Click to view version changes", expanded=False):
     st.markdown("""
 **v1.7** *(current)*
 - Added **ADB (Asian Development Bank)** as a fourth live source
+- ADB tenders fetched via ScraperAPI; **Active-only** filter applied at parse time
+- Extracts: title, deadline, country, sector, notice type, approval number,
+  executing agency, contractor name/address, ADB-financed & total contract amounts
+- Red `🏦 ADB` badge
+- Paginates up to 5 pages (no keyword) or 15 pages (with keyword)
 
-**v1.6** *(current)*
-- Added **CPPP India** as a third live source (Central Public Procurement Portal)
-- CPPP tenders fetched via curl + BeautifulSoup, keyword-filtered client-side
-- Orange accent colour and 🇮🇳 badge to distinguish Indian tenders
-- Deadline badge now parses CPPP date format (DD-Mon-YYYY HH:MM AM/PM)
-
-**v1.5**
-- Auto-translation of TED Europa notices to English via `deep-translator`
-
-**v1.4**
-- Dates displayed in DD-MM-YYYY format
-
-**v1.3**
-- Enriched field fetching for World Bank and TED Europa
-- Full Details panel with structured sections
+**v1.6** — Added CPPP India  
+**v1.5** — TED Europa auto-translation  
+**v1.4** — DD-MM-YYYY date format  
+**v1.3** — Enriched World Bank + TED fields  
 """)
 
 with st.expander("🔒 Privacy Policy", expanded=False):
     st.markdown("""
 **Last updated: April 2026**
 
-#### What this app does
-BidAtlas is a read-only procurement tracking tool. It fetches publicly available tender
-notices from the World Bank, TED Europa, and CPPP India and displays them in your browser.
+BidAtlas is a read-only procurement tracker. It fetches publicly available tender notices
+from the World Bank, TED Europa, CPPP India, and ADB.
 
-#### Data we collect
-**None.** BidAtlas does not collect, store, or transmit any personal data.
+**We collect no personal data.** Search keywords are sent to third-party APIs and proxies
+but are not logged by this app. No cookies are set by this app beyond what CPPP requires for scraping.
 
-- **Search keywords** are sent directly to the respective third-party APIs (World Bank,
-  TED Europa) or used locally to filter results. They are not logged or retained by this app.
-- **No cookies** are set by this application. The `cookies.txt` file used during CPPP
-  requests is written to local temporary storage on the server running the app and contains
-  only session tokens issued by CPPP — no personal information.
-- **No accounts, no tracking, no analytics.**
-
-#### Third-party sources
-This app retrieves data from:
-- [World Bank Open Data](https://data.worldbank.org) — governed by the [World Bank Terms of Use](https://www.worldbank.org/en/about/legal/terms-of-use-for-datasets)
-- [TED Europa](https://ted.europa.eu) — governed by the [European Union Open Data policy](https://data.europa.eu/en/publications/open-data-in-europe)
-- [CPPP India](https://eprocure.gov.in/cppp) — governed by the Government of India's portal terms
-
-This app has no affiliation with any of these organisations.
-
-#### Contact
-For questions about this app, contact the developer: **Aqib Ahmed**.
+Sources: [World Bank](https://data.worldbank.org) · [TED Europa](https://ted.europa.eu)
+· [CPPP India](https://eprocure.gov.in/cppp) · [ADB](https://www.adb.org/projects/tenders)
+· [ScraperAPI](https://www.scraperapi.com)
 """)
 
 # ── Fetch ──────────────────────────────────────────────────────
@@ -1159,10 +1122,10 @@ if "all_notices" not in st.session_state or search_btn:
     if src_wb:   selected_sources.append(("World Bank", fetch_worldbank))
     if src_ted:  selected_sources.append(("TED Europa", fetch_ted))
     if src_cppp: selected_sources.append(("CPPP India", fetch_cppp))
-    if src_adb:  selected_sources.append(("ADB", fetch_adb))
+    if src_adb:  selected_sources.append(("ADB",        fetch_adb))
 
     all_notices: list = []
-    with st.spinner("Fetching from all sources in parallel…"):
+    with st.spinner("Fetching from all sources in parallel..."):
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(fn, keyword, results_limit): name for name, fn in selected_sources}
             for future in as_completed(futures):
@@ -1206,7 +1169,9 @@ if all_notices:
         all_countries  = sorted(set(n.get("country", "") for n in all_notices if n.get("country")))
         country_filter = st.multiselect("Filter by country", all_countries, placeholder="All countries")
     with col2:
-        source_filter  = st.multiselect("Filter by source", ["World Bank", "TED Europa", "CPPP India", "ADB"], placeholder="All sources")
+        source_filter  = st.multiselect("Filter by source",
+                                        ["World Bank", "TED Europa", "CPPP India", "ADB"],
+                                        placeholder="All sources")
     with col3:
         nature_vals    = sorted(set(n.get("nature", "") for n in all_notices if n.get("nature")))
         nature_filter  = st.multiselect("Filter by nature", nature_vals, placeholder="All types")
