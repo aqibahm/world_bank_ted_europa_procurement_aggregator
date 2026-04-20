@@ -1111,9 +1111,7 @@ from the World Bank, TED Europa, CPPP India, and ADB.
 but are not logged by this app. No cookies are set by this app beyond what CPPP requires for scraping.
 
 Sources: [World Bank](https://data.worldbank.org) · [TED Europa](https://ted.europa.eu)
-· [CPPP India](https://eprocure.gov.in/cppp) · [ADB](https://www.adb.org/projects/tenders)
-· [ScraperAPI](https://www.scraperapi.com)
-""")
+· [CPPP India](https://eprocure.gov.in/cppp) · [ADB](https://www.adb.org/projects/tenders)""")
 
 # ── Fetch ──────────────────────────────────────────────────────
 
