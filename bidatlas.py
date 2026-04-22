@@ -1088,7 +1088,7 @@ with st.expander("📦 v1.7 — Click to view version changes", expanded=False):
     st.markdown("""
 **v1.7** *(current)*
 - Added **ADB (Asian Development Bank)** as a fourth live source
-- ADB tenders fetched via ScraperAPI; **Active-only** filter applied at parse time
+- ADB tenders fetched; **Active-only** filter applied at parse time
 - Extracts: title, deadline, country, sector, notice type, approval number,
   executing agency, contractor name/address, ADB-financed & total contract amounts
 - Red `🏦 ADB` badge
@@ -1111,9 +1111,7 @@ from the World Bank, TED Europa, CPPP India, and ADB.
 but are not logged by this app. No cookies are set by this app beyond what CPPP requires for scraping.
 
 Sources: [World Bank](https://data.worldbank.org) · [TED Europa](https://ted.europa.eu)
-· [CPPP India](https://eprocure.gov.in/cppp) · [ADB](https://www.adb.org/projects/tenders)
-· [ScraperAPI](https://www.scraperapi.com)
-""")
+· [CPPP India](https://eprocure.gov.in/cppp) · [ADB](https://www.adb.org/projects/tenders)""")
 
 # ── Fetch ──────────────────────────────────────────────────────
 
