@@ -41,13 +41,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
-import subprocess, sys
-
-if not os.path.exists(os.path.expanduser("~/.cache/ms-playwright")):
-    subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        check=False
-    )
 
 try:
     from deep_translator import GoogleTranslator
@@ -1496,9 +1489,9 @@ def _send_email(matches: list, keywords: list, to_addrs: list = None) -> str:
     if not cfg["user"] or not cfg["password"]:
         return "SMTP not configured — add SMTP_USER and SMTP_PASS to .streamlit/secrets.toml or environment variables."
 
-    recipients = to_addrs or [a.strip() for a in _cfg_get("email_to", "").split(",") if a.strip()]
+    recipients = to_addrs if to_addrs else []
     if not recipients:
-        return "No recipient email address configured."
+        return "No recipient email address provided."
 
     from_addr = cfg["from"] or cfg["user"]
     subject   = f"BidAtlas Alert — {len(matches)} new tender(s) matched"
@@ -1530,7 +1523,8 @@ def _send_email(matches: list, keywords: list, to_addrs: list = None) -> str:
 
 def _run_alert_check(sources: list, keywords: list,
                      results_limit: int = 10,
-                     state_portals: list = None) -> dict:
+                     state_portals: list = None,
+                     to_addrs: list = None) -> dict:
     """
     Fetch from selected sources, find new tenders matching keywords,
     send notifications. Returns a summary dict.
@@ -1576,7 +1570,7 @@ def _run_alert_check(sources: list, keywords: list,
     if new:
         _mark_seen(new)
         if _cfg_get("email_enabled") == "1":
-            email_err = _send_email(new, keywords)
+            email_err = _send_email(new, keywords, to_addrs=to_addrs)
 
     _cfg_set("last_check", datetime.now().strftime("%Y-%m-%d %H:%M"))
     _cfg_set("last_check_total",   str(len(all_notices)))
@@ -1994,10 +1988,12 @@ with tab_alerts:
     st.markdown("#### Your email address")
     alert_user_email = st.text_input(
         "Email address to receive alerts",
-        value=_cfg_get("email_to", ""),
+        value=st.session_state.get("user_email", ""),
         placeholder="you@example.com",
         key="alert_user_email",
     )
+    # Keep in session state for this browser session only — never written to DB
+    st.session_state["user_email"] = alert_user_email
 
     # ── Section 2: Keywords ───────────────────────────────────
     st.markdown("#### Keywords to track")
@@ -2097,7 +2093,6 @@ with tab_alerts:
         if st.button("💾 Save settings", type="primary", use_container_width=True):
             _cfg_set("alert_keywords",   alert_keywords_raw)
             _cfg_set("alert_sources",    json.dumps(alert_sources))
-            _cfg_set("email_to",         alert_user_email)
             _cfg_set("email_enabled",    "1" if email_enabled else "0")
             _cfg_set("alert_state_portals",
                      json.dumps([p["state"] for p in alert_state_portals]))
@@ -2132,7 +2127,8 @@ with tab_alerts:
             st.warning("No sources selected — configure and save first.")
         else:
             with st.spinner(f"Checking {len(_srcs)} source(s)…"):
-                _result = _run_alert_check(_srcs, _kws, state_portals=_s_portals or None)
+                _result = _run_alert_check(_srcs, _kws, state_portals=_s_portals or None,
+                                           to_addrs=[alert_user_email] if alert_user_email else None)
             st.success(
                 f"Done — {_result['total']} fetched · "
                 f"{_result['matched']} keyword match · "
@@ -2157,7 +2153,7 @@ with tab_alerts:
             "deadline": datetime.now().strftime("%Y-%m-%d"),
             "link": "https://example.com",
         }]
-        _err = _send_email(_dummy, ["test"])
+        _err = _send_email(_dummy, ["test"], to_addrs=[alert_user_email])
         if _err:
             st.error(f"Test email failed: {_err}")
         else:
