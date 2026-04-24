@@ -1340,15 +1340,7 @@ def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> lis
         if len(results) >= max_results:
             break
         href  = (el.get_attribute("href") or "").strip()
-        title = (el.inner_text() or "").strip()
 
-        # If anchor text is empty, try reading from the parent TD
-        if not title:
-            title = (el.evaluate(
-                "el => el.closest('td')?.innerText || el.parentElement?.innerText || ''"
-            ) or "").strip()
-
-        # href is mandatory
         if not href or href in seen:
             continue
         if "component=" not in href and "%24" not in href:
@@ -1356,12 +1348,37 @@ def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> lis
         if any(ex in href for ex in _EXCLUDE):
             continue
 
-        if len(debug_sample) < 10:
-            debug_sample.append(f"title={title[:40]!r} href={href[:60]}")
+        # Get full DOM context for this anchor
+        dom_info = el.evaluate("""el => ({
+            inner:      el.innerText || '',
+            textContent: el.textContent || '',
+            parentTag:  el.parentElement?.tagName || '',
+            parentText: el.parentElement?.innerText || '',
+            parentInner: el.parentElement?.textContent || '',
+            tdText:     el.closest('td')?.innerText || '',
+            trText:     el.closest('tr')?.innerText || '',
+            outerHTML:  el.outerHTML.slice(0, 200),
+        })""")
+
+        if len(debug_sample) < 5:
+            debug_sample.append(
+                f"href={href[:50]} | "
+                f"inner={dom_info['inner'][:30]!r} | "
+                f"tdText={dom_info['tdText'][:50]!r} | "
+                f"parentTag={dom_info['parentTag']} | "
+                f"html={dom_info['outerHTML'][:80]!r}"
+            )
 
         seen.add(href)
 
-        # Last-resort fallback title
+        # Try multiple ways to get the title
+        title = (
+            dom_info["inner"].strip()
+            or dom_info["textContent"].strip()
+            or dom_info["tdText"].strip()
+            or dom_info["parentText"].strip()
+        )
+
         if not title:
             sp = href.split("sp=")[-1][:20] if "sp=" in href else ""
             title = f"Tender {sp}" if sp else "Untitled Tender"
