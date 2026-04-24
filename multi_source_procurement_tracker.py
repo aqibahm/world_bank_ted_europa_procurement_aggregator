@@ -1249,48 +1249,52 @@ def _scrape_angular(page, state: str, url: str, kw: str, max_results: int) -> li
 
 
 def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> list:
-    """
-    GePNIC/Tapestry portals (Arunachal, Assam, Kerala, etc.):
-    Tender links on the landing page use Tapestry component= URLs with
-    the pattern component=%24DirectLink (URL-encoded $DirectLink).
-    The FrontEndLatestActiveTenders listing page requires a session and
-    renders empty without one, so we scrape the homepage widget instead.
-
-    Excluded component patterns (non-tender):
-      - WebRightMenu  → login / enrollment / password links
-      - DirectLink_0  → corrigendum section links
-      - DirectLink_3  → file/document download links
-      - component=clear → search clear button
-    """
     results = []
     base    = "/".join(url.split("/")[:3])
     seen    = set()
 
-    _EXCLUDE = ("WebRightMenu", "DirectLink_0", "DirectLink_3", "component=clear")
+    _EXCLUDE = ("WebRightMenu", "DirectLink_0", "DirectLink_3",
+                "component=clear", "service=page", "service=restart",
+                "FrontEndContactUs", "SiteMap", "page=Home&service=page",
+                "StandardBidding", "Debarment", "Announcements",
+                "WebAwards", "SiteComp", "FAQFrontEnd", "DSCInfo",
+                "HelpForContractors", "BiddersManualKit", "FrontFeedback",
+                "hassle_free", "login.html", "india.gov", "nic.in",
+                "Disclaimer", "MIS", "gepnic.gov", "eprocdashboard")
 
-    for el in page.query_selector_all("td a[href], span a[href]"):
+    all_els = page.query_selector_all("td a[href], span a[href]")
+    debug_sample = []
+
+    for el in all_els:
         if len(results) >= max_results:
             break
-
         title = (el.inner_text() or "").strip()
         href  = (el.get_attribute("href") or "").strip()
-
         if not title or not href or href in seen:
             continue
-        # Must be a Tapestry component link
-        if "component=" not in href:
-            continue
-        # Exclude known non-tender component patterns
-        if any(ex in href for ex in _EXCLUDE):
+
+        has_component = "component=" in href
+        blocked_by    = [ex for ex in _EXCLUDE if ex in href]
+
+        # Log first 10 component= links for debug
+        if has_component and len(debug_sample) < 10:
+            debug_sample.append(f"title={title[:40]!r} blocked={blocked_by} href={href[:60]}")
+
+        if not has_component or blocked_by:
             continue
 
         seen.add(href)
-
         if kw and kw not in title.lower():
             continue
-
         full_href = base + href if href.startswith("/") else href
         results.append(_build_notice(state, url, title, full_href))
+
+    # Store debug sample
+    import streamlit as _st
+    existing = _st.session_state.get("gepnic_debug", [])
+    existing.append(f"=={state}== ({len(all_els)} candidates, {len(results)} results)")
+    existing.extend(debug_sample)
+    _st.session_state["gepnic_debug"] = existing
 
     return results
 
@@ -1314,6 +1318,12 @@ def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_resu
         diag["td_anchors"]   = len(page.query_selector_all("td a[href]"))
         diag["tables"]       = len(page.query_selector_all("table"))
         diag["component_links"] = len(page.query_selector_all("a[href*='component=']"))
+
+        # Sample first 5 td anchor hrefs for debugging
+        sample_hrefs = []
+        for el in page.query_selector_all("td a[href]")[:5]:
+            sample_hrefs.append((el.inner_text() or "").strip()[:30] + " | " + (el.get_attribute("href") or "")[:80])
+        diag["sample_hrefs"] = sample_hrefs
 
         has_angular_tabs = any(page.query_selector(sel) for sel in _NIC_TAB_SELECTORS)
         has_gepnic_nav   = bool(page.query_selector(f"a[href*='{_GEPNIC_ACTIVE_PAGE}']"))
@@ -2009,20 +2019,24 @@ with tab_state:
                 for p in [p for p in STATE_PORTALS if p["state"] in selected_state_names]:
                     diag = st.session_state.get(f"diag_{p['state']}")
                     if diag:
-                        st.caption(
-                            f"**{p['state']}** — "
-                            + (f"error: {diag['error']}" if "error" in diag else
-                               f"title={diag.get('title')!r} "
-                               f"html={diag.get('html_len')} "
-                               f"anchors={diag.get('all_anchors')} "
-                               f"td_anchors={diag.get('td_anchors')} "
-                               f"tables={diag.get('tables')} "
-                               f"component_links={diag.get('component_links')} "
-                               f"angular={diag.get('has_angular')} "
-                               f"gepnic={diag.get('has_gepnic')} "
-                               f"strategy={diag.get('strategy')}"
+                        if "error" in diag:
+                            st.caption(f"**{p['state']}** — error: {diag['error']}")
+                        else:
+                            st.caption(
+                                f"**{p['state']}** — "
+                                f"html={diag.get('html_len')} "
+                                f"anchors={diag.get('all_anchors')} "
+                                f"td_anchors={diag.get('td_anchors')} "
+                                f"component_links={diag.get('component_links')} "
+                                f"angular={diag.get('has_angular')} "
+                                f"gepnic={diag.get('has_gepnic')}"
                             )
-                        )
+                            for h in diag.get("sample_hrefs", []):
+                                st.caption(f"  → {h}")
+                if st.session_state.get("gepnic_debug"):
+                    st.markdown("**GePNIC link-level debug:**")
+                    for line in st.session_state["gepnic_debug"]:
+                        st.caption(line)
             if st.button("🔬 Load Latest State Tenders", type="primary", use_container_width=False, key="inline_state_btn"):
                 if _do_scan():
                     st.rerun()
