@@ -27,6 +27,7 @@ no external Excel file is required.
 import io
 import json
 import os
+import sys
 import sqlite3
 import smtplib
 import subprocess
