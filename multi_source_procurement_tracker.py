@@ -42,6 +42,18 @@ from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
+# Auto-install Playwright browser on first run (needed on Streamlit Cloud)
+try:
+    _pw_cache = os.path.expanduser("~/.cache/ms-playwright")
+    if not os.path.exists(_pw_cache) or not os.listdir(_pw_cache):
+        import subprocess, sys
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=False, capture_output=True,
+        )
+except Exception:
+    pass
+
 try:
     from deep_translator import GoogleTranslator
     _TRANSLATOR_AVAILABLE = True
@@ -1899,9 +1911,11 @@ with tab_global:
 # ══════════════════════════════════════════════════════════════
 with tab_state:
     if not _PLAYWRIGHT_AVAILABLE:
-        st.warning(
-            "**Playwright is not installed.** "
-            "Run `pip install playwright && playwright install chromium` and restart the app."
+        st.error(
+            "**Playwright is not available.** "
+            "The app attempted to install it automatically at startup. "
+            "Try restarting the app — if this persists, ensure `playwright` is in `requirements.txt` "
+            "and `packages.txt` contains the required system libraries."
         )
     else:
         selected_portals = [p for p in STATE_PORTALS if p["state"] in selected_state_names]
