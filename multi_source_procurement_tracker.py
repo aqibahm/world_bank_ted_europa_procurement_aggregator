@@ -41,6 +41,22 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
+import sys
+
+def install_playwright_chromium():
+    try:
+        # Check if Playwright is available
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+
+    # Install Chromium browser
+    try:
+        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+    except subprocess.CalledProcessError as e:
+        print("Playwright Chromium install failed:", e)
+
+install_playwright_chromium()
 
 try:
     from deep_translator import GoogleTranslator

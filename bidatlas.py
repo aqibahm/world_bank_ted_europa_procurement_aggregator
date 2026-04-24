@@ -2,33 +2,45 @@
 Global Procurement Tracker — Multi-Source Streamlit App
 
 Sources:
-  - World Bank (IBRD + IDA)  → JSON API, no key
-  - TED Europa (EU)          → REST API v3, no key (RSS fallback)
-  - CPPP India               → HTML scrape via curl + BeautifulSoup
-  - ADB (Asian Dev Bank)     → HTML scrape via ScraperAPI
+  - World Bank (IBRD + IDA)        → JSON API, no key
+  - TED Europa (EU)                → REST API v3, no key (RSS fallback)
+  - CPPP India                     → HTML scrape via curl + BeautifulSoup
+  - ADB (Asian Dev Bank)           → HTML scrape via ScraperAPI
+  - India State E-Proc Portals     → Playwright headless Chromium (JS-rendered)
 
 Setup:
     python3 -m venv venv
     source venv/bin/activate
-    pip install streamlit requests beautifulsoup4 deep-translator
+    pip install streamlit requests beautifulsoup4 deep-translator playwright pandas
+    playwright install chromium
     streamlit run procurement_tracker.py
 
-ScraperAPI key:
+ScraperAPI key (ADB source):
     Set via environment variable SCRAPERAPI_KEY
     or in .streamlit/secrets.toml as:
         SCRAPERAPI_KEY = "your_key_here"
+
+State portal data (portals + keywords) is embedded in the script —
+no external Excel file is required.
 """
 
+import io
 import json
 import os
+import sqlite3
+import smtplib
 import subprocess
+import threading
 import time
 import re as _re
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import pandas as pd
 
 try:
     from deep_translator import GoogleTranslator
@@ -256,12 +268,15 @@ def render_notice(notice: dict, idx: int):
     lot_count = notice.get("lot_count", "")
 
     src_labels = {
-        "World Bank": ("🌍 World Bank",  "src-wb",   "badge-source"),
-        "TED Europa": ("🇪🇺 TED Europa", "src-ted",  "badge-source"),
-        "CPPP India": ("🇮🇳 CPPP India", "src-cppp", "badge-source-cppp"),
-        "ADB":        ("🏦 ADB",         "src-adb",  "badge-source-adb"),
+        "World Bank":   ("🌍 World Bank",   "src-wb",   "badge-source"),
+        "TED Europa":   ("🇪🇺 TED Europa",  "src-ted",  "badge-source"),
+        "CPPP India":   ("🇮🇳 CPPP India",  "src-cppp", "badge-source-cppp"),
+        "ADB":          ("🏦 ADB",          "src-adb",  "badge-source-adb"),
     }
-    src_label, src_class, src_badge_class = src_labels.get(src, (src, "", "badge-source"))
+    if src.endswith(" Tenders"):
+        src_label, src_class, src_badge_class = f"🏛 {src}", "src-cppp", "badge-source-cppp"
+    else:
+        src_label, src_class, src_badge_class = src_labels.get(src, (src, "", "badge-source"))
 
     badges = [
         f'<span class="badge {src_badge_class}">{src_label}</span>',
@@ -1029,44 +1044,701 @@ def fetch_adb(keyword: str, rows: int) -> list:
 
 
 # ══════════════════════════════════════════════════════════════
+#  SOURCE 5 — INDIA STATE E-PROCUREMENT PORTALS
+#  Portal list & keywords are embedded directly from the Excel.
+#  Scraping uses Selenium headless Chrome (JS-rendered pages).
+# ══════════════════════════════════════════════════════════════
+
+try:
+    from playwright.sync_api import sync_playwright as _sync_playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+
+# ── Embedded portal list (EProc Portals sheet, URL column) ───
+STATE_PORTALS = [
+    {"state": "Andaman & Nicobar Islands",       "url": "https://eprocure.andamannicobar.gov.in/nicgep/app"},
+    {"state": "Andhra Pradesh",                  "url": "https://tender.apeprocurement.gov.in/login.html"},
+    {"state": "Arunachal Pradesh",               "url": "https://arunachaltenders.gov.in/nicgep/app"},
+    {"state": "Assam",                           "url": "https://assamtenders.gov.in/nicgep/app"},
+    {"state": "Bihar",                           "url": "https://eproc2.bihar.gov.in/EPSV2Web/openarea/tenderListingPage.action#upcomingTenders"},
+    {"state": "Chandigarh",                      "url": "https://etenders.chd.nic.in/nicgep/app"},
+    {"state": "Chhattisgarh",                    "url": "https://eproc.cgstate.gov.in/CHEPS/business/getOpenRfqListAction.do"},
+    {"state": "CPPP",                            "url": "https://eprocure.gov.in/eprocure/app"},
+    {"state": "Daman & Diu / Dadra & Nagar Haveli", "url": "https://dnhtenders.gov.in/nicgep/app"},
+    {"state": "Delhi",                           "url": "https://govtprocurement.delhi.gov.in/nicgep/app"},
+    {"state": "GeM BidPlus",                     "url": "https://bidplus.gem.gov.in"},
+    {"state": "Goa",                             "url": "https://eprocure.goa.gov.in/nicgep/app"},
+    {"state": "Haryana",                         "url": "https://etenders.hry.nic.in/nicgep/app"},
+    {"state": "Himachal Pradesh",                "url": "https://hptenders.gov.in/nicgep/app"},
+    {"state": "Jammu & Kashmir",                 "url": "https://jktenders.gov.in/nicgep/app"},
+    {"state": "Jharkhand",                       "url": "https://jharkhandtenders.gov.in/nicgep/app"},
+    {"state": "Kerala",                          "url": "https://etenders.kerala.gov.in/nicgep/app"},
+    {"state": "Lakshadweep",                     "url": "https://tendersutl.gov.in/nicgep/app"},
+    {"state": "Madhya Pradesh",                  "url": "https://mptenders.gov.in/nicgep/app"},
+    {"state": "Maharashtra",                     "url": "https://mahatenders.gov.in/nicgep/app"},
+    {"state": "Manipur",                         "url": "https://manipurtenders.gov.in/nicgep/app"},
+    {"state": "Meghalaya",                       "url": "https://meghalayatenders.gov.in/nicgep/app"},
+    {"state": "Mizoram",                         "url": "https://mizoramtenders.gov.in/nicgep/app"},
+    {"state": "Nagaland",                        "url": "https://nagalandtenders.gov.in/nicgep/app"},
+    {"state": "Odisha",                          "url": "https://tendersodisha.gov.in/nicgep/app"},
+    {"state": "Puducherry",                      "url": "https://pudutenders.gov.in/nicgep/app"},
+    {"state": "Punjab",                          "url": "https://eproc.punjab.gov.in/nicgep/app"},
+    {"state": "Rajasthan",                       "url": "https://eproc.rajasthan.gov.in/nicgep/app"},
+    {"state": "Sikkim",                          "url": "https://www.sikkim.gov.in/tender/tenders"},
+    {"state": "Tamil Nadu",                      "url": "https://tntenders.gov.in/nicgep/app"},
+    {"state": "Telangana",                       "url": "https://tender.telangana.gov.in/login.html"},
+    {"state": "Tripura",                         "url": "https://www.tripuratenders.gov.in/nicgep/app"},
+    {"state": "Uttar Pradesh",                   "url": "https://etender.up.nic.in/nicgep/app"},
+    {"state": "Uttarakhand",                     "url": "https://uktenders.gov.in/nicgep/app"},
+    {"state": "West Bengal",                     "url": "https://wbtenders.gov.in/nicgep/app"},
+]
+
+# ── Embedded keyword list (Keywords sheet, KEY WORDS column) ─
+STATE_KEYWORDS = [
+    "PMU", "Project Management Unit", "Consult", "Expert", "Partner",
+    "Environment", "air quality", "NCAP", "Clean Air", "Climate", "Pollution",
+    "CITIIS", "Sustainability", "SBM", "Swachh", "Capacity", "carbon",
+    "net-zero", "Resiliance", "Mitigation", "Disaster", "Eco-system",
+    "conservation", "renewable", "recycle", "circular", "Green", "Forest",
+    "waste", "Nature", "Nbs",
+    "consultancy", "consultant", "advisory", "knowledge partner",
+    "technical assistance", "TSU", "capacity building", "training",
+    "feasibility study", "DPR", "monitoring and evaluation", "M&E",
+    "impact assessment", "policy support", "research study",
+]
+
+_PORTAL_NAMES = [p["state"] for p in STATE_PORTALS]
+
+_STATE_KW_LOWER = [k.lower() for k in STATE_KEYWORDS]
+
+
+
+# ── Portal type detection ─────────────────────────────────────
+# Bihar-style: AngularJS with hash tabs and Bootstrap striped tables
+# GePNIC-style: Tapestry framework, tender links on a dedicated listing page
+_NIC_TABLE_IDS   = ["myTablebyrTl", "myTab", "tenderTable", "tenderListTable"]
+_NIC_TAB_SELECTORS = [
+    "a[href='#latestTenders']",
+    "a[href='#upcomingTenders']",
+    "a[href='#activeTenders']",
+    "a[href='#tenderList']",
+]
+_GEPNIC_ACTIVE_PAGE = "page=FrontEndLatestActiveTenders"
+
+
+def _build_notice(state: str, url: str, title: str, href: str,
+                  tender_id: str = "", ref_no: str = "",
+                  dept: str = "", deadline: str = "") -> dict:
+    return {
+        "source":             f"{state} Tenders",
+        "title":              title,
+        "type":               "Active Tender",
+        "country":            "India",
+        "agency":             dept or state,
+        "deadline":           deadline,
+        "amount":             "",
+        "link":               href,
+        "notice_id":          tender_id,
+        "publication_date":   datetime.now().strftime("%Y-%m-%d"),
+        "publication_number": ref_no,
+        "project_id":         "",
+        "borrower":           state,
+        "contact":            "",
+        "description":        f"Ref: {ref_no}  |  Portal: {url}" if ref_no else f"Portal: {url}",
+        "sector":             "",
+        "nature":             "",
+        "procedure":          "",
+        "language":           "English",
+        "cpv_codes":          "",
+        "nuts_code":          "",
+        "award_value":        "",
+        "lot_count":          "",
+        "buyer_id":           "",
+        "corrigendum":        "",
+        "contractor":         "",
+        "address":            "",
+        "approval_number":    "",
+    }
+
+
+def _scrape_angular(page, state: str, url: str, kw: str, max_results: int) -> list:
+    """Bihar-style: click Angular tab, read Bootstrap striped table rows."""
+    results = []
+
+    for sel in _NIC_TAB_SELECTORS:
+        tab = page.query_selector(sel)
+        if tab:
+            tab.click()
+            page.wait_for_timeout(4000)
+            break
+
+    tender_table = None
+    for tid in _NIC_TABLE_IDS:
+        t = page.query_selector(f"table#{tid}")
+        if t and len(t.query_selector_all("tbody tr")) > 1:
+            tender_table = t
+            break
+    if not tender_table:
+        for t in page.query_selector_all("table.table-striped"):
+            if len(t.query_selector_all("tbody tr")) > 1:
+                tender_table = t
+                break
+    if not tender_table:
+        return []
+
+    headers = [
+        th.inner_text().strip().lower()
+        for th in tender_table.query_selector_all("thead tr th, tr:first-child th, tr:first-child td")
+    ]
+
+    def _col(keys, default):
+        for i, h in enumerate(headers):
+            if any(k in h for k in keys):
+                return i
+        return default
+
+    col_id       = _col(["tender id", "rfq id", "tender/rfq"], 1)
+    col_title    = _col(["description", "tender desc"],         2)
+    col_ref      = _col(["reference", "ref no"],                3)
+    col_dept     = _col(["department", "dept", "organisation"], 4)
+    col_deadline = _col(["end date", "closing", "deadline"],    5)
+    base_url     = "/".join(url.split("/")[:3])
+
+    for row in tender_table.query_selector_all("tbody tr"):
+        if len(results) >= max_results:
+            break
+        cells = row.query_selector_all("td")
+        if len(cells) < 4:
+            continue
+
+        def cell(i):
+            return cells[i].inner_text().strip() if i < len(cells) else ""
+
+        title    = cell(col_title)
+        tid_val  = cell(col_id)
+        ref_no   = cell(col_ref)
+        dept     = cell(col_dept)
+        deadline = cell(col_deadline)
+
+        if not title or title.lower() == "no record found":
+            continue
+        if kw and kw not in title.lower() and kw not in dept.lower() and kw not in ref_no.lower():
+            continue
+
+        a_tag = row.query_selector("a[href]")
+        href  = a_tag.get_attribute("href") if a_tag else ""
+        if href and not href.startswith("http"):
+            href = base_url + href if href.startswith("/") else ""
+
+        results.append(_build_notice(state, url, title, href, tid_val, ref_no, dept, deadline))
+
+    return results
+
+
+def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> list:
+    """
+    GePNIC/Tapestry portals (Arunachal, Assam, Kerala, etc.):
+    Tender links on the landing page use Tapestry component= URLs with
+    the pattern component=%24DirectLink (URL-encoded $DirectLink).
+    The FrontEndLatestActiveTenders listing page requires a session and
+    renders empty without one, so we scrape the homepage widget instead.
+
+    Excluded component patterns (non-tender):
+      - WebRightMenu  → login / enrollment / password links
+      - DirectLink_0  → corrigendum section links
+      - DirectLink_3  → file/document download links
+      - component=clear → search clear button
+    """
+    results = []
+    base    = "/".join(url.split("/")[:3])
+    seen    = set()
+
+    _EXCLUDE = ("WebRightMenu", "DirectLink_0", "DirectLink_3", "component=clear")
+
+    for el in page.query_selector_all("td a[href], span a[href]"):
+        if len(results) >= max_results:
+            break
+
+        title = (el.inner_text() or "").strip()
+        href  = (el.get_attribute("href") or "").strip()
+
+        if not title or not href or href in seen:
+            continue
+        # Must be a Tapestry component link
+        if "component=" not in href:
+            continue
+        # Exclude known non-tender component patterns
+        if any(ex in href for ex in _EXCLUDE):
+            continue
+
+        seen.add(href)
+
+        if kw and kw not in title.lower():
+            continue
+
+        full_href = base + href if href.startswith("/") else href
+        results.append(_build_notice(state, url, title, full_href))
+
+    return results
+
+
+def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_results: int = 50) -> list:
+    kw   = keyword.strip().lower()
+    page = browser.new_page()
+
+    try:
+        page.goto(url, timeout=30000, wait_until="networkidle")
+        page.wait_for_timeout(2000)
+
+        # Detect portal type by checking for Angular tab links
+        has_angular_tabs = any(
+            page.query_selector(sel) for sel in _NIC_TAB_SELECTORS
+        )
+        # Also detect GePNIC by presence of the active-tenders nav link
+        has_gepnic_nav = bool(page.query_selector(f"a[href*='{_GEPNIC_ACTIVE_PAGE}']"))
+
+        if has_angular_tabs:
+            return _scrape_angular(page, state, url, kw, max_results)
+        elif has_gepnic_nav or "nicgep/app" in url:
+            return _scrape_gepnic(page, state, url, kw, max_results)
+        else:
+            # Unknown structure — fall back to GePNIC strategy
+            return _scrape_gepnic(page, state, url, kw, max_results)
+
+    except Exception:
+        return []
+    finally:
+        page.close()
+
+
+# ── Multi-portal orchestrator ─────────────────────────────────
+def fetch_state_portals(selected_portals: list, keyword: str = "", max_results: int = 50) -> list:
+    if not _PLAYWRIGHT_AVAILABLE:
+        return []
+
+    all_results = []
+
+    with _sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            for p in selected_portals:
+                all_results.extend(
+                    _scrape_portal_pw(browser, p["state"], p["url"], keyword, max_results)
+                )
+                time.sleep(2)
+        finally:
+            browser.close()
+
+    return all_results
+
+
+    return all_results
+
+
+# ══════════════════════════════════════════════════════════════
+#  ALERTS ENGINE
+# ══════════════════════════════════════════════════════════════
+
+_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bidbatlas_alerts.db")
+
+
+def _db() -> sqlite3.Connection:
+    conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db():
+    with _db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS seen_tenders (
+                uid       TEXT PRIMARY KEY,
+                source    TEXT,
+                title     TEXT,
+                link      TEXT,
+                deadline  TEXT,
+                agency    TEXT,
+                seen_at   TEXT
+            );
+            CREATE TABLE IF NOT EXISTS alert_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                sent_at    TEXT,
+                channel    TEXT,
+                recipient  TEXT,
+                subject    TEXT,
+                body_snip  TEXT,
+                n_tenders  INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS alert_config (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
+
+
+_init_db()
+
+
+def _cfg_get(key: str, default: str = "") -> str:
+    with _db() as conn:
+        row = conn.execute("SELECT value FROM alert_config WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+
+def _cfg_set(key: str, value: str):
+    with _db() as conn:
+        conn.execute("INSERT OR REPLACE INTO alert_config(key,value) VALUES(?,?)", (key, value))
+
+
+def _tender_uid(n: dict) -> str:
+    """Stable unique ID for a tender notice."""
+    return f"{n.get('source','')}|{n.get('notice_id') or n.get('link') or n.get('title','')}"
+
+
+def _filter_new(notices: list) -> list:
+    """Return only notices not previously seen."""
+    if not notices:
+        return []
+    with _db() as conn:
+        new = []
+        for n in notices:
+            uid = _tender_uid(n)
+            if not conn.execute("SELECT 1 FROM seen_tenders WHERE uid=?", (uid,)).fetchone():
+                new.append(n)
+        return new
+
+
+def _mark_seen(notices: list):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with _db() as conn:
+        for n in notices:
+            uid = _tender_uid(n)
+            conn.execute(
+                "INSERT OR IGNORE INTO seen_tenders(uid,source,title,link,deadline,agency,seen_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (uid, n.get("source",""), n.get("title",""), n.get("link",""),
+                 n.get("deadline",""), n.get("agency",""), now)
+            )
+
+
+def _keyword_match(notices: list, keywords: list) -> list:
+    if not keywords:
+        return notices
+    kws = [k.strip().lower() for k in keywords if k.strip()]
+    if not kws:
+        return notices
+    out = []
+    for n in notices:
+        haystack = " ".join([
+            n.get("title",""), n.get("agency",""), n.get("description",""),
+            n.get("sector",""), n.get("country",""),
+        ]).lower()
+        if any(kw in haystack for kw in kws):
+            out.append(n)
+    return out
+
+
+def _build_email_body(matches: list, keywords: list) -> str:
+    kw_str = ", ".join(keywords) if keywords else "all tenders"
+    lines  = [
+        f"<h2>🔔 BidAtlas Alert — {len(matches)} new tender(s)</h2>",
+        f"<p>Keywords matched: <strong>{kw_str}</strong></p>",
+        f"<p>Checked at: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
+        "<hr>",
+    ]
+    for n in matches[:50]:
+        title    = n.get("title","Untitled")
+        source   = n.get("source","")
+        agency   = n.get("agency","")
+        deadline = n.get("deadline","")
+        link     = n.get("link","")
+        lines.append(f"<p><strong>{title}</strong><br>")
+        if source:   lines.append(f"Source: {source}<br>")
+        if agency:   lines.append(f"Agency: {agency}<br>")
+        if deadline: lines.append(f"Deadline: {deadline}<br>")
+        if link:     lines.append(f'<a href="{link}">View tender →</a>')
+        lines.append("</p><hr>")
+    return "\n".join(lines)
+
+
+def _get_smtp_config() -> dict:
+    """Read SMTP settings from st.secrets or environment variables — never from the DB."""
+    def _s(key, default=""):
+        try:
+            return st.secrets.get(key, os.environ.get(key, default))
+        except Exception:
+            return os.environ.get(key, default)
+    return {
+        "host": _s("SMTP_HOST", "smtp.gmail.com"),
+        "port": int(_s("SMTP_PORT", "587")),
+        "user": _s("SMTP_USER", ""),
+        "password": _s("SMTP_PASS", ""),
+        "from":  _s("SMTP_FROM", ""),
+    }
+
+
+def _smtp_configured() -> bool:
+    cfg = _get_smtp_config()
+    return bool(cfg["user"] and cfg["password"])
+
+
+def _send_email(matches: list, keywords: list, to_addrs: list = None) -> str:
+    """Send alert email. Returns '' on success, error string on failure."""
+    cfg = _get_smtp_config()
+    if not cfg["user"] or not cfg["password"]:
+        return "SMTP not configured — add SMTP_USER and SMTP_PASS to .streamlit/secrets.toml or environment variables."
+
+    recipients = to_addrs if to_addrs else []
+    if not recipients:
+        return "No recipient email address provided."
+
+    from_addr = cfg["from"] or cfg["user"]
+    subject   = f"BidAtlas Alert — {len(matches)} new tender(s) matched"
+    body      = _build_email_body(matches, keywords)
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = from_addr
+        msg["To"]      = ", ".join(recipients)
+        msg.attach(MIMEText(body, "html"))
+
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as s:
+            s.starttls()
+            s.login(cfg["user"], cfg["password"])
+            s.sendmail(from_addr, recipients, msg.as_string())
+
+        with _db() as conn:
+            conn.execute(
+                "INSERT INTO alert_log(sent_at,channel,recipient,subject,body_snip,n_tenders) "
+                "VALUES(?,?,?,?,?,?)",
+                (datetime.now().strftime("%Y-%m-%d %H:%M"), "email",
+                 ", ".join(recipients), subject, body[:200], len(matches))
+            )
+        return ""
+    except Exception as e:
+        return str(e)
+
+
+def _run_alert_check(sources: list, keywords: list,
+                     results_limit: int = 10,
+                     state_portals: list = None,
+                     to_addrs: list = None) -> dict:
+    """
+    Fetch from selected sources, find new tenders matching keywords,
+    send notifications. Returns a summary dict.
+    """
+    all_notices = []
+    errors      = []
+
+    # Global sources
+    source_map = {
+        "World Bank": fetch_worldbank,
+        "TED Europa": fetch_ted,
+        "CPPP India": fetch_cppp,
+        "ADB":        fetch_adb,
+    }
+
+    global_sources = [s for s in sources if s in source_map]
+    if global_sources:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {
+                pool.submit(fn, "", results_limit): name
+                for name, fn in source_map.items()
+                if name in global_sources
+            }
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    all_notices.extend(fut.result())
+                except Exception as e:
+                    errors.append(f"{name}: {e}")
+
+    # State portals
+    if "State Portals" in sources and state_portals and _PLAYWRIGHT_AVAILABLE:
+        try:
+            portal_kw = keywords[0] if keywords else ""
+            all_notices.extend(fetch_state_portals(state_portals, portal_kw, results_limit))
+        except Exception as e:
+            errors.append(f"State Portals: {e}")
+
+    matched  = _keyword_match(all_notices, keywords)
+    new      = _filter_new(matched)
+
+    email_err = ""
+    if new:
+        _mark_seen(new)
+        if _cfg_get("email_enabled") == "1":
+            email_err = _send_email(new, keywords, to_addrs=to_addrs)
+
+    _cfg_set("last_check", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    _cfg_set("last_check_total",   str(len(all_notices)))
+    _cfg_set("last_check_matched", str(len(matched)))
+    _cfg_set("last_check_new",     str(len(new)))
+
+    return {
+        "total":     len(all_notices),
+        "matched":   len(matched),
+        "new":       len(new),
+        "new_items": new,
+        "errors":    errors,
+        "email_err": email_err,
+    }
+
+
+# ── Background scheduler ──────────────────────────────────────
+_scheduler_lock   = threading.Lock()
+_scheduler_thread = None
+_scheduler_stop   = threading.Event()
+
+
+def _scheduler_loop(interval_hours: float):
+    while not _scheduler_stop.wait(timeout=interval_hours * 3600):
+        try:
+            sources  = json.loads(_cfg_get("alert_sources", "[]"))
+            keywords = [k for k in _cfg_get("alert_keywords", "").split("\n") if k.strip()]
+            saved_states = json.loads(_cfg_get("alert_state_portals", "[]"))
+            state_portals = [p for p in STATE_PORTALS if p["state"] in saved_states] or None
+            if sources:
+                _run_alert_check(sources, keywords, state_portals=state_portals)
+        except Exception:
+            pass
+
+
+def _start_scheduler(interval_hours: float):
+    global _scheduler_thread, _scheduler_stop
+    with _scheduler_lock:
+        _scheduler_stop.set()   # stop any existing thread
+        _scheduler_stop = threading.Event()
+        _scheduler_thread = threading.Thread(
+            target=_scheduler_loop,
+            args=(interval_hours,),
+            daemon=True,
+            name="bidbatlas-scheduler",
+        )
+        _scheduler_thread.start()
+
+
+def _stop_scheduler():
+    global _scheduler_stop
+    with _scheduler_lock:
+        _scheduler_stop.set()
+
+
+def _scheduler_running() -> bool:
+    return (
+        _scheduler_thread is not None
+        and _scheduler_thread.is_alive()
+        and not _scheduler_stop.is_set()
+    )
+
+
+# Auto-restart scheduler on page load if it was previously enabled
+if _cfg_get("scheduler_enabled") == "1" and not _scheduler_running():
+    _start_scheduler(float(_cfg_get("scheduler_interval_hours", "6")))
+
+
+# ══════════════════════════════════════════════════════════════
 #  SIDEBAR
 # ══════════════════════════════════════════════════════════════
 
 with st.sidebar:
-    st.markdown("---")
-    st.markdown("### 🔍 Search")
-
-    keyword = st.text_input(
-        "Keyword", value="",
-        placeholder="climate, governance, health...",
-        help="Leave blank to browse latest notices",
+    # Tab selector mirrors the main tabs
+    active_tab = st.radio(
+        "Navigate",
+        ["🌐 Global Tenders", "🏛 India State Portals", "🔔 Alerts"],
+        key="active_tab",
+        label_visibility="collapsed",
     )
+    st.markdown("---")
 
-    st.markdown("**Sources**")
-    src_wb   = st.checkbox("🌍 World Bank",  value=True)
-    src_ted  = st.checkbox("🇪🇺 TED Europa", value=True)
-    src_cppp = st.checkbox("🇮🇳 CPPP India", value=True)
-    src_adb  = st.checkbox("🏦 ADB",         value=True)
+    # ── Global Tenders sidebar ────────────────────────────────
+    if active_tab == "🌐 Global Tenders":
+        st.markdown("### 🔍 Search")
+        keyword = st.text_input(
+            "Keyword", value="",
+            placeholder="climate, governance, health...",
+            help="Leave blank to browse latest notices",
+        )
+        st.markdown("**Sources**")
+        src_wb   = st.checkbox("🌍 World Bank",  value=True)
+        src_ted  = st.checkbox("🇪🇺 TED Europa", value=True)
+        src_cppp = st.checkbox("🇮🇳 CPPP India", value=True)
+        src_adb  = st.checkbox("🏦 ADB",         value=True)
+        results_limit = st.slider("Results per source", 3, 20, 5, step=1)
+        search_btn    = st.button("🔎 Search", use_container_width=True, type="primary")
+        st.markdown("---")
+        st.markdown("**Quick keywords**")
+        for qk in ["climate", "governance", "health", "infrastructure",
+                    "education", "digital", "construction", "IT services"]:
+            if st.button(qk, use_container_width=True, key=f"qk_{qk}"):
+                keyword    = qk
+                search_btn = True
+    else:
+        keyword       = ""
+        src_wb        = True
+        src_ted       = True
+        src_cppp      = True
+        src_adb       = True
+        results_limit = 5
+        search_btn    = False
 
-    results_limit = st.slider("Results per source", 3, 20, 5, step=1)
-    search_btn    = st.button("🔎 Search", use_container_width=True, type="primary")
+    # ── India State Portals sidebar ───────────────────────────
+    if active_tab == "🏛 India State Portals":
+        st.markdown("### 🏛 State Portals")
+        state_select_mode = st.radio(
+            "Select states",
+            ["All states", "Choose states"],
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+        if state_select_mode == "Choose states":
+            selected_state_names = st.multiselect(
+                "States", _PORTAL_NAMES,
+                default=["Bihar", "Arunachal Pradesh"],
+                placeholder="Pick states…",
+            )
+        else:
+            selected_state_names = _PORTAL_NAMES
+        portal_keyword = st.text_input(
+            "Keyword", value="",
+            placeholder="Leave blank to load all tenders…",
+            key="portal_keyword",
+            help="Filter tenders by keyword. Leave empty to load all.",
+        )
+        portal_max_results = st.slider(
+            "Results per portal", min_value=10, max_value=200, value=50, step=10,
+        )
+        portal_scan_btn = st.button(
+            "🔬 Scan State Portals", use_container_width=True, type="primary",
+            disabled=not _PLAYWRIGHT_AVAILABLE,
+            help="Requires: playwright" if not _PLAYWRIGHT_AVAILABLE else "",
+        )
+        if not _PLAYWRIGHT_AVAILABLE:
+            st.caption("⚠️ Install playwright to enable this feature.")
+    else:
+        selected_state_names = _PORTAL_NAMES
+        portal_keyword       = ""
+        portal_max_results   = 50
+        portal_scan_btn      = False
+
+    # ── Alerts sidebar ────────────────────────────────────────
+    if active_tab == "🔔 Alerts":
+        st.markdown("### 🔔 Alert Status")
+        st.metric("Last check", _cfg_get("last_check", "Never"))
+        if _scheduler_running():
+            st.success(f"✅ Scheduler running · every {_cfg_get('scheduler_interval_hours','6')}h")
+        else:
+            st.caption("Scheduler not running.")
 
     st.markdown("---")
-    st.markdown("**Quick keywords**")
-    for qk in ["climate", "governance", "health", "infrastructure",
-                "education", "digital", "construction", "IT services"]:
-        if st.button(qk, use_container_width=True, key=f"qk_{qk}"):
-            keyword    = qk
-            search_btn = True
-
-    st.markdown("---")
-    st.caption("Live data · World Bank · TED Europa · CPPP India · ADB")
+    st.caption("Live data · World Bank · TED Europa · CPPP India · ADB · State Portals")
     st.markdown(
-        '<p style="font-size:0.72rem;color:#5a7a9a;margin:0;">'
+        '<p style="font-size:0.72rem;color:#5a7a9a;margin:0;">' +
         'Built by <strong style="color:#003a70;">Aqib Ahmed</strong>.</p>',
         unsafe_allow_html=True,
     )
-
 
 # ══════════════════════════════════════════════════════════════
 #  MAIN
@@ -1077,23 +1749,23 @@ st.markdown("""
   <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:0.5rem;">
     <div style="min-width:0;flex:1;">
       <h1>🌐 BidAtlas — Global Procurement Tracker</h1>
-      <p>World Bank · TED Europa · CPPP India · ADB · Live data · Click ▶ on any card to expand full details</p>
+      <p>World Bank · TED Europa · CPPP India · ADB · India State Portals · Live data · Click ▶ on any card to expand full details</p>
       <p style="margin-top:0.4rem;font-size:0.72rem;opacity:0.55;">Built by <strong style="opacity:0.9;">Aqib Ahmed</strong></p>
     </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-with st.expander("📦 v1.7 — Click to view version changes", expanded=False):
+with st.expander("📦 v1.9 — Click to view version changes", expanded=False):
     st.markdown("""
-**v1.7** *(current)*
-- Added **ADB (Asian Development Bank)** as a fourth live source
-- ADB tenders fetched; **Active-only** filter applied at parse time
-- Extracts: title, deadline, country, sector, notice type, approval number,
-  executing agency, contractor name/address, ADB-financed & total contract amounts
-- Red `🏦 ADB` badge
-- Paginates up to 5 pages (no keyword) or 15 pages (with keyword)
+**v1.9** *(current)*
+- Added **🔔 Alerts tab** — email notifications for new tenders matching keywords
+- Configurable sources, keywords, recipients and SMTP settings
+- Background scheduler with configurable check interval
+- Alert history and seen-tenders deduplication database
 
+**v1.8** — Added India State E-Procurement Portals (Playwright)  
+**v1.7** — Added ADB (Asian Development Bank)  
 **v1.6** — Added CPPP India  
 **v1.5** — TED Europa auto-translation  
 **v1.4** — DD-MM-YYYY date format  
@@ -1105,87 +1777,416 @@ with st.expander("🔒 Privacy Policy", expanded=False):
 **Last updated: April 2026**
 
 BidAtlas is a read-only procurement tracker. It fetches publicly available tender notices
-from the World Bank, TED Europa, CPPP India, and ADB.
+from the World Bank, TED Europa, CPPP India, ADB, and India State E-Procurement Portals.
 
-**We collect no personal data.** Search keywords are sent to third-party APIs and proxies
-but are not logged by this app. No cookies are set by this app beyond what CPPP requires for scraping.
+**Data we collect:**
+- **Email address** — if you configure alerts, your email address is stored locally in a SQLite database (`bidbatlas_alerts.db`) on the machine running this app. It is used solely to deliver tender alert emails and is never shared with third parties.
+- **SMTP credentials** — if provided, your SMTP username and password are stored locally in the same database and used only to send alert emails on your behalf.
+- **Seen tenders** — a record of previously alerted tenders is stored locally to avoid duplicate notifications. This data never leaves the machine.
+
+**Data we do not collect:** Search keywords are sent to third-party APIs (World Bank, TED Europa, ScraperAPI) but are not logged by this app. No cookies are set by this app beyond what CPPP requires for scraping. No analytics or tracking of any kind is performed.
 
 Sources: [World Bank](https://data.worldbank.org) · [TED Europa](https://ted.europa.eu)
-· [CPPP India](https://eprocure.gov.in/cppp) · [ADB](https://www.adb.org/projects/tenders)""")
+· [CPPP India](https://eprocure.gov.in/cppp) · [ADB](https://www.adb.org/projects/tenders)
+· India State E-Procurement Portals""")
 
-# ── Fetch ──────────────────────────────────────────────────────
+# ── Tabs ───────────────────────────────────────────────────────
+_TAB_NAMES = ["🌐 Global Tenders", "🏛 India State Portals", "🔔 Alerts"]
+tab_global, tab_state, tab_alerts = st.tabs(_TAB_NAMES)
 
-if "all_notices" not in st.session_state or search_btn:
-    selected_sources = []
-    if src_wb:   selected_sources.append(("World Bank", fetch_worldbank))
-    if src_ted:  selected_sources.append(("TED Europa", fetch_ted))
-    if src_cppp: selected_sources.append(("CPPP India", fetch_cppp))
-    if src_adb:  selected_sources.append(("ADB",        fetch_adb))
+# ══════════════════════════════════════════════════════════════
+#  TAB 1 — GLOBAL TENDERS (original behaviour)
+# ══════════════════════════════════════════════════════════════
+with tab_global:
+    # Only fetch when a search button is explicitly pressed
+    if search_btn:
+        selected_sources = []
+        if src_wb:   selected_sources.append(("World Bank", fetch_worldbank))
+        if src_ted:  selected_sources.append(("TED Europa", fetch_ted))
+        if src_cppp: selected_sources.append(("CPPP India", fetch_cppp))
+        if src_adb:  selected_sources.append(("ADB",        fetch_adb))
 
-    all_notices: list = []
-    with st.spinner("Fetching from all sources in parallel..."):
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(fn, keyword, results_limit): name for name, fn in selected_sources}
-            for future in as_completed(futures):
-                try:
-                    all_notices.extend(future.result())
-                except Exception as e:
-                    st.warning(f"Error from {futures[future]}: {e}")
+        all_notices: list = []
+        with st.spinner("Fetching from all sources in parallel..."):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(fn, keyword, results_limit): name for name, fn in selected_sources}
+                for future in as_completed(futures):
+                    try:
+                        all_notices.extend(future.result())
+                    except Exception as e:
+                        st.warning(f"Error from {futures[future]}: {e}")
 
-    all_notices.sort(key=lambda n: n.get("deadline") or "9999-99-99")
-    st.session_state["all_notices"] = all_notices
-    st.session_state["kw"]          = keyword
+        all_notices.sort(key=lambda n: n.get("deadline") or "9999-99-99")
+        st.session_state["all_notices"] = all_notices
+        st.session_state["kw"]          = keyword
 
-all_notices: list = st.session_state.get("all_notices", [])
-kw: str           = st.session_state.get("kw", "")
+    all_notices: list = st.session_state.get("all_notices", [])
+    kw: str           = st.session_state.get("kw", "")
 
-# ── Stats ──────────────────────────────────────────────────────
+    if all_notices:
+        source_counts: dict = {}
+        for n in all_notices:
+            s = n.get("source", "Unknown")
+            source_counts[s] = source_counts.get(s, 0) + 1
 
-if all_notices:
-    source_counts: dict = {}
-    for n in all_notices:
-        s = n.get("source", "Unknown")
-        source_counts[s] = source_counts.get(s, 0) + 1
+        urgent   = sum(1 for n in all_notices if 0 <= (days_until(n.get("deadline") or "") or 999) <= 14)
+        with_val = sum(1 for n in all_notices if n.get("amount") or n.get("award_value"))
 
-    urgent   = sum(1 for n in all_notices if 0 <= (days_until(n.get("deadline") or "") or 999) <= 14)
-    with_val = sum(1 for n in all_notices if n.get("amount") or n.get("award_value"))
+        cols = st.columns(len(source_counts) + 3)
+        cols[0].metric("Total Notices", len(all_notices))
+        cols[1].metric("Closing ≤14d",  urgent)
+        cols[2].metric("With Value",     with_val)
+        for i, (src, count) in enumerate(source_counts.items(), 3):
+            cols[i].metric(src, count)
 
-    cols = st.columns(len(source_counts) + 3)
-    cols[0].metric("Total Notices", len(all_notices))
-    cols[1].metric("Closing ≤14d",  urgent)
-    cols[2].metric("With Value",     with_val)
-    for i, (src, count) in enumerate(source_counts.items(), 3):
-        cols[i].metric(src, count)
+        st.markdown("---")
 
+    if all_notices:
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            all_countries  = sorted(set(n.get("country", "") for n in all_notices if n.get("country")))
+            country_filter = st.multiselect("Filter by country", all_countries, placeholder="All countries")
+        with col2:
+            source_filter  = st.multiselect("Filter by source",
+                                            ["World Bank", "TED Europa", "CPPP India", "ADB"],
+                                            placeholder="All sources")
+        with col3:
+            nature_vals    = sorted(set(n.get("nature", "") for n in all_notices if n.get("nature")))
+            nature_filter  = st.multiselect("Filter by nature", nature_vals, placeholder="All types")
+
+        filtered = [
+            n for n in all_notices
+            if (not country_filter or n.get("country") in country_filter)
+            and (not source_filter  or n.get("source")  in source_filter)
+            and (not nature_filter  or n.get("nature")  in nature_filter)
+        ]
+
+        label = f"**{len(filtered)} notices**" + (f' matching *"{kw}"*' if kw else " (latest)")
+        st.caption(label)
+
+        csv_buf = io.StringIO()
+        pd.DataFrame(filtered).to_csv(csv_buf, index=False)
+        st.download_button(
+            "⬇️ Download results as CSV",
+            csv_buf.getvalue(),
+            file_name=f"global_tenders_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+        )
+
+        st.markdown("---")
+
+        for i, notice in enumerate(filtered):
+            render_notice(notice, i)
+
+    else:
+        st.markdown("### 🌐 Latest Global Tenders")
+        st.caption("Configure sources and keyword in the sidebar, then press the button to load.")
+        if st.button("🔎 Load Latest Tenders", type="primary", use_container_width=False, key="inline_global_btn"):
+            selected_sources = []
+            if src_wb:   selected_sources.append(("World Bank", fetch_worldbank))
+            if src_ted:  selected_sources.append(("TED Europa", fetch_ted))
+            if src_cppp: selected_sources.append(("CPPP India", fetch_cppp))
+            if src_adb:  selected_sources.append(("ADB",        fetch_adb))
+            all_notices = []
+            with st.spinner("Fetching from all sources..."):
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = {executor.submit(fn, "", results_limit): name for name, fn in selected_sources}
+                    for future in as_completed(futures):
+                        try:
+                            all_notices.extend(future.result())
+                        except Exception as e:
+                            st.warning(f"Error from {futures[future]}: {e}")
+            all_notices.sort(key=lambda n: n.get("deadline") or "9999-99-99")
+            st.session_state["all_notices"] = all_notices
+            st.session_state["kw"]          = ""
+            st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════
+#  TAB 2 — INDIA STATE PORTALS
+# ══════════════════════════════════════════════════════════════
+with tab_state:
+    if not _PLAYWRIGHT_AVAILABLE:
+        st.warning(
+            "**Playwright is not installed.** "
+            "Run `pip install playwright && playwright install chromium` and restart the app."
+        )
+    else:
+        selected_portals = [p for p in STATE_PORTALS if p["state"] in selected_state_names]
+
+        # Only fetch on explicit button press — never auto-fetch
+        _cache_key = (tuple(sorted(selected_state_names)), portal_keyword.strip(), portal_max_results)
+
+        def _do_scan():
+            if not selected_portals:
+                st.warning("No states selected — pick at least one in the sidebar.")
+                return
+            _status = st.empty()
+            with _status.container():
+                st.info(
+                    f"⏳ Scanning **{len(selected_portals)}** portal(s)…  "
+                    f"{'Keyword: *' + portal_keyword.strip() + '*' if portal_keyword.strip() else 'Loading all tenders'}"
+                )
+            with st.spinner(f"Scanning {len(selected_portals)} portal(s)…"):
+                _results = fetch_state_portals(selected_portals, portal_keyword.strip(), portal_max_results)
+            st.session_state["state_results"]   = _results
+            st.session_state["state_cache_key"] = _cache_key
+            _status.empty()
+
+        # Sidebar button re-scan (keyword/state changed)
+        if portal_scan_btn:
+            _do_scan()
+
+        state_results: list = st.session_state.get("state_results", [])
+
+        if state_results:
+            state_counts = {}
+            for r in state_results:
+                state_counts[r["source"]] = state_counts.get(r["source"], 0) + 1
+
+            m1, m2 = st.columns(2)
+            m1.metric("Total Matches",  len(state_results))
+            m2.metric("States Scanned", len(state_counts))
+
+            st.markdown("---")
+
+            all_states = sorted(state_counts.keys())
+            state_f    = st.multiselect("Filter by state", all_states, placeholder="All states")
+
+            shown = [r for r in state_results if not state_f or r["source"] in state_f]
+
+            st.caption(f"**{len(shown)} notices**")
+
+            csv_buf = io.StringIO()
+            pd.DataFrame(shown).to_csv(csv_buf, index=False)
+            st.download_button(
+                "⬇️ Download results as CSV",
+                csv_buf.getvalue(),
+                file_name=f"state_tenders_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+            )
+
+            st.markdown("---")
+
+            for i, notice in enumerate(shown):
+                render_notice(notice, i)
+
+        else:
+            st.markdown("### 🏛 India State Portal Tenders")
+            if st.button("🔬 Load Latest State Tenders", type="primary", use_container_width=False, key="inline_state_btn"):
+                _do_scan()
+                st.rerun()
+
+# ══════════════════════════════════════════════════════════════
+#  TAB 3 — ALERTS
+# ══════════════════════════════════════════════════════════════
+with tab_alerts:
+    st.markdown("### 🔔 Tender Alert Configuration")
+    st.caption("Get notified by email when new tenders matching your keywords are published.")
+
+    # ── Section 1: Recipient ──────────────────────────────────
+    st.markdown("#### Your email address")
+    alert_user_email = st.text_input(
+        "Email address to receive alerts",
+        value=st.session_state.get("user_email", ""),
+        placeholder="you@example.com",
+        key="alert_user_email",
+    )
+    # Keep in session state for this browser session only — never written to DB
+    st.session_state["user_email"] = alert_user_email
+
+    # ── Section 2: Keywords ───────────────────────────────────
+    st.markdown("#### Keywords to track")
+    alert_keywords_raw = st.text_area(
+        "One keyword per line — leave blank to match all tenders",
+        value=_cfg_get("alert_keywords", ""),
+        height=120,
+        placeholder="climate\nconsultancy\nPMU\nrenewable energy",
+        key="alert_kw_input",
+    )
+
+    # ── Section 3: Sources ────────────────────────────────────
+    st.markdown("#### Sources to monitor")
+    _saved_sources = json.loads(_cfg_get("alert_sources", "[]"))
+
+    _a_col1, _a_col2 = st.columns(2)
+    with _a_col1:
+        a_wb    = st.checkbox("🌍 World Bank",     value="World Bank"    in _saved_sources, key="a_wb")
+        a_cppp  = st.checkbox("🇮🇳 CPPP India",    value="CPPP India"    in _saved_sources, key="a_cppp")
+        a_state = st.checkbox("🏛 State Portals",  value="State Portals" in _saved_sources, key="a_state",
+                              disabled=not _PLAYWRIGHT_AVAILABLE,
+                              help="Requires Playwright" if not _PLAYWRIGHT_AVAILABLE else "")
+    with _a_col2:
+        a_ted   = st.checkbox("🇪🇺 TED Europa",    value="TED Europa"    in _saved_sources, key="a_ted")
+        a_adb   = st.checkbox("🏦 ADB",            value="ADB"           in _saved_sources, key="a_adb")
+
+    alert_sources = [s for s, on in [
+        ("World Bank", a_wb), ("TED Europa", a_ted),
+        ("CPPP India", a_cppp), ("ADB", a_adb),
+        ("State Portals", a_state),
+    ] if on]
+
+    # State portal selector — shown only when State Portals is checked
+    _saved_alert_states = json.loads(_cfg_get("alert_state_portals", "[]"))
+    alert_state_portals = []
+    if a_state and _PLAYWRIGHT_AVAILABLE:
+        _alert_state_mode = st.radio(
+            "State selection",
+            ["All states", "Choose states"],
+            horizontal=True,
+            key="alert_state_mode",
+            label_visibility="collapsed",
+        )
+        if _alert_state_mode == "Choose states":
+            _chosen = st.multiselect(
+                "States to scan",
+                _PORTAL_NAMES,
+                default=_saved_alert_states if _saved_alert_states else ["Bihar", "Arunachal Pradesh"],
+                key="alert_state_select",
+            )
+            alert_state_portals = [p for p in STATE_PORTALS if p["state"] in _chosen]
+        else:
+            alert_state_portals = STATE_PORTALS
+
+    # ── Section 4: Email ──────────────────────────────────────
+    st.markdown("#### Email alerts")
+    email_enabled = st.toggle("Send email alerts", value=_cfg_get("email_enabled") == "1", key="email_toggle")
+
+    if email_enabled:
+        if _smtp_configured():
+            st.success("✅ SMTP is configured — alerts will be sent from the server's email account.")
+        else:
+            st.warning(
+                "⚠️ SMTP is not configured. Ask your administrator to add "
+                "`SMTP_USER`, `SMTP_PASS`, `SMTP_HOST`, `SMTP_PORT`, and `SMTP_FROM` "
+                "to `.streamlit/secrets.toml` or the server environment variables."
+            )
+
+    # ── Section 5: Scheduler ──────────────────────────────────
+    st.markdown("#### Automatic checks")
+    sched_enabled = st.toggle(
+        "Run automatic checks in the background",
+        value=_cfg_get("scheduler_enabled") == "1",
+        key="sched_toggle",
+        help="Checks run while the app is open. On a server the app stays running 24/7.",
+    )
+    if sched_enabled:
+        interval_h = st.select_slider(
+            "Check every",
+            options=[1, 2, 4, 6, 12, 24],
+            value=int(_cfg_get("scheduler_interval_hours", "6")),
+            format_func=lambda x: f"{x}h",
+            key="sched_interval",
+        )
+        if _scheduler_running():
+            st.success(f"✅ Scheduler running — checks every {interval_h}h")
+        else:
+            st.warning("⚠️ Scheduler not running — press Save to start it.")
+    else:
+        interval_h = int(_cfg_get("scheduler_interval_hours", "6"))
+
+    # ── Buttons ───────────────────────────────────────────────
     st.markdown("---")
+    _s1, _s2, _s3 = st.columns(3)
 
-# ── Filters ────────────────────────────────────────────────────
+    with _s1:
+        if st.button("💾 Save settings", type="primary", use_container_width=True):
+            _cfg_set("alert_keywords",   alert_keywords_raw)
+            _cfg_set("alert_sources",    json.dumps(alert_sources))
+            _cfg_set("email_enabled",    "1" if email_enabled else "0")
+            _cfg_set("alert_state_portals",
+                     json.dumps([p["state"] for p in alert_state_portals]))
+            _cfg_set("scheduler_enabled", "1" if sched_enabled else "0")
+            if sched_enabled:
+                _cfg_set("scheduler_interval_hours", str(interval_h))
+                _start_scheduler(interval_h)
+            else:
+                _stop_scheduler()
+            st.success("Settings saved.")
 
-if all_notices:
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        all_countries  = sorted(set(n.get("country", "") for n in all_notices if n.get("country")))
-        country_filter = st.multiselect("Filter by country", all_countries, placeholder="All countries")
-    with col2:
-        source_filter  = st.multiselect("Filter by source",
-                                        ["World Bank", "TED Europa", "CPPP India", "ADB"],
-                                        placeholder="All sources")
-    with col3:
-        nature_vals    = sorted(set(n.get("nature", "") for n in all_notices if n.get("nature")))
-        nature_filter  = st.multiselect("Filter by nature", nature_vals, placeholder="All types")
+    with _s2:
+        _check_btn = st.button(
+            "🔍 Check now", use_container_width=True,
+            disabled=not alert_sources,
+            help="Run a check immediately and send alerts for any new matches.",
+        )
 
-    filtered = [
-        n for n in all_notices
-        if (not country_filter or n.get("country") in country_filter)
-        and (not source_filter  or n.get("source")  in source_filter)
-        and (not nature_filter  or n.get("nature")  in nature_filter)
-    ]
+    with _s3:
+        _test_btn = st.button(
+            "✉️ Send test email", use_container_width=True,
+            disabled=not (email_enabled and _smtp_configured() and bool(alert_user_email)),
+            help="Send a test email to verify your settings.",
+        )
 
-    label = f"**{len(filtered)} notices**" + (f' matching *"{kw}"*' if kw else " (latest)")
-    st.caption(label)
+    if _check_btn:
+        _kws  = [k for k in _cfg_get("alert_keywords", "").split("\n") if k.strip()]
+        _srcs = json.loads(_cfg_get("alert_sources", "[]"))
+        _s_portals = [p for p in STATE_PORTALS
+                      if p["state"] in json.loads(_cfg_get("alert_state_portals", "[]"))]
+        if not _srcs:
+            st.warning("No sources selected — configure and save first.")
+        else:
+            with st.spinner(f"Checking {len(_srcs)} source(s)…"):
+                _result = _run_alert_check(_srcs, _kws, state_portals=_s_portals or None,
+                                           to_addrs=[alert_user_email] if alert_user_email else None)
+            st.success(
+                f"Done — {_result['total']} fetched · "
+                f"{_result['matched']} keyword match · "
+                f"**{_result['new']} new**"
+            )
+            if _result["errors"]:
+                st.warning("Errors: " + "; ".join(_result["errors"]))
+            if _result["email_err"]:
+                st.error(f"Email error: {_result['email_err']}")
+            if _result["new_items"]:
+                st.markdown("**New tenders found:**")
+                for n in _result["new_items"][:10]:
+                    st.markdown(
+                        f"- **{n.get('title','Untitled')}** — "
+                        f"{n.get('source','')} · {n.get('agency','')}"
+                    )
 
-    for i, notice in enumerate(filtered):
-        render_notice(notice, i)
+    if _test_btn:
+        _dummy = [{
+            "title": "Test Tender — BidAtlas Alert System",
+            "source": "Test", "agency": "Test Agency",
+            "deadline": datetime.now().strftime("%Y-%m-%d"),
+            "link": "https://example.com",
+        }]
+        _err = _send_email(_dummy, ["test"], to_addrs=[alert_user_email])
+        if _err:
+            st.error(f"Test email failed: {_err}")
+        else:
+            st.success(f"Test email sent to {alert_user_email}")
 
-else:
-    st.info("Use the sidebar to search, or click **Search** to load the latest notices.")
+    # ── Status ────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Status")
+    _sm1, _sm2, _sm3, _sm4 = st.columns(4)
+    _sm1.metric("Last check",    _cfg_get("last_check", "Never"))
+    _sm2.metric("Fetched",       _cfg_get("last_check_total",   "—"))
+    _sm3.metric("Keyword match", _cfg_get("last_check_matched", "—"))
+    _sm4.metric("New (alerted)", _cfg_get("last_check_new",     "—"))
+
+    # ── Alert history ─────────────────────────────────────────
+    st.markdown("#### Alert history")
+    with _db() as _conn:
+        _logs = _conn.execute(
+            "SELECT sent_at, channel, subject, n_tenders "
+            "FROM alert_log ORDER BY id DESC LIMIT 50"
+        ).fetchall()
+    if _logs:
+        st.dataframe(pd.DataFrame([dict(r) for r in _logs]),
+                     use_container_width=True, hide_index=True)
+    else:
+        st.caption("No alerts sent yet.")
+
+    with _db() as _conn:
+        _seen_count = _conn.execute("SELECT COUNT(*) FROM seen_tenders").fetchone()[0]
+    st.caption(f"{_seen_count} tenders in seen-tenders database.")
+    if st.button("🗑 Clear seen-tenders database", key="clear_seen",
+                 help="Next check will treat all tenders as new and re-alert."):
+        with _db() as _conn:
+            _conn.execute("DELETE FROM seen_tenders")
+        st.success("Seen-tenders database cleared.")
+        st.rerun()
