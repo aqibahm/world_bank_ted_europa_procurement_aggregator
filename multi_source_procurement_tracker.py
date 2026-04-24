@@ -43,13 +43,11 @@ from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
-def ensure_playwright():
-    cache_path = os.path.expanduser("~/.cache/ms-playwright")
-    
-    if not os.path.exists(cache_path):
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
-
-ensure_playwright()
+if not os.path.exists(os.path.expanduser("~/.cache/ms-playwright")):
+    subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        check=False
+    )
 
 try:
     from deep_translator import GoogleTranslator
