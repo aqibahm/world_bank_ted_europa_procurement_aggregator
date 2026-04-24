@@ -1913,8 +1913,10 @@ with tab_state:
             if not selected_portals:
                 st.warning("No states selected — pick at least one in the sidebar.")
                 return False
+            st.info(f"DEBUG: scanning {len(selected_portals)} portal(s): {[p['state'] for p in selected_portals[:3]]}")
             with st.spinner(f"Scanning {len(selected_portals)} portal(s)…"):
                 _results = fetch_state_portals(selected_portals, portal_keyword.strip(), portal_max_results)
+            st.info(f"DEBUG: got {len(_results)} results")
             st.session_state["state_results"]   = _results
             st.session_state["state_cache_key"] = _cache_key
             return True
