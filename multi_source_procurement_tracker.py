@@ -41,53 +41,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
-import sys
-
-def ensure_playwright():
-    marker = "/tmp/playwright_ready"
-    lock   = "/tmp/playwright_lock"
-
-    # Already installed → skip
-    if os.path.exists(marker):
-        return True
-
-    # Wait if another Streamlit thread is installing
-    while os.path.exists(lock):
-        time.sleep(1)
-
-    try:
-        open(lock, "w").close()
-
-        # Step 1: Ensure Python package
-        try:
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
-
-        # Step 2: Ensure Chromium binary
-        try:
-            subprocess.check_call([
-                sys.executable, "-m", "playwright", "install", "chromium"
-            ])
-        except subprocess.CalledProcessError:
-            return False
-
-        # Mark success
-        with open(marker, "w") as f:
-            f.write("ok")
-
-        return True
-
-    finally:
-        if os.path.exists(lock):
-            os.remove(lock)
-
-
-# Replace your old detection logic with this:
-_PLAYWRIGHT_AVAILABLE = ensure_playwright()
-
-if _PLAYWRIGHT_AVAILABLE:
-    from playwright.sync_api import sync_playwright as _sync_playwright
 
 try:
     from deep_translator import GoogleTranslator
@@ -1367,10 +1320,7 @@ def fetch_state_portals(selected_portals: list, keyword: str = "", max_results: 
     all_results = []
 
     with _sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-            )
+        browser = pw.chromium.launch(headless=True)
         try:
             for p in selected_portals:
                 all_results.extend(
