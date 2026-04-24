@@ -1368,8 +1368,9 @@ def fetch_state_portals(selected_portals: list, keyword: str = "", max_results: 
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            "--single-process",
             "--disable-extensions",
+            "--disable-setuid-sandbox",
+            "--disable-software-rasterizer",
         ])
         try:
             for p in selected_portals:
