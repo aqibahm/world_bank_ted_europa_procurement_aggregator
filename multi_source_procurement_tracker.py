@@ -46,16 +46,22 @@ import sys
 
 def install_playwright_chromium():
     try:
-        # Check if Playwright is available
         from playwright.sync_api import sync_playwright
     except ImportError:
+        st.write("Installing Playwright...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
 
-    # Install Chromium browser
     try:
-        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
-    except subprocess.CalledProcessError as e:
-        print("Playwright Chromium install failed:", e)
+        st.write("Installing Chromium...")
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True
+        )
+        st.text(result.stdout)
+        st.text(result.stderr)
+    except Exception as e:
+        st.error(f"Install failed: {e}")
 
 install_playwright_chromium()
 
