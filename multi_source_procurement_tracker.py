@@ -1253,14 +1253,7 @@ def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> lis
     base    = "/".join(url.split("/")[:3])
     seen    = set()
 
-    _EXCLUDE = ("WebRightMenu", "DirectLink_0", "DirectLink_3",
-                "component=clear", "service=page", "service=restart",
-                "FrontEndContactUs", "SiteMap", "page=Home&service=page",
-                "StandardBidding", "Debarment", "Announcements",
-                "WebAwards", "SiteComp", "FAQFrontEnd", "DSCInfo",
-                "HelpForContractors", "BiddersManualKit", "FrontFeedback",
-                "hassle_free", "login.html", "india.gov", "nic.in",
-                "Disclaimer", "MIS", "gepnic.gov", "eprocdashboard")
+    _EXCLUDE = ("WebRightMenu", "DirectLink_0", "DirectLink_3", "component=clear")
 
     all_els = page.query_selector_all("td a[href], span a[href]")
     debug_sample = []
@@ -1268,28 +1261,33 @@ def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> lis
     for el in all_els:
         if len(results) >= max_results:
             break
-        title = (el.inner_text() or "").strip()
         href  = (el.get_attribute("href") or "").strip()
-        if not title or not href or href in seen:
+        title = (el.inner_text() or "").strip()
+
+        # href is mandatory; title can be empty (image-only anchors)
+        if not href or href in seen:
+            continue
+        if "component=" not in href and "%24" not in href:
+            continue
+        if any(ex in href for ex in _EXCLUDE):
             continue
 
-        has_component = "component=" in href
-        blocked_by    = [ex for ex in _EXCLUDE if ex in href]
-
-        # Log first 10 component= links for debug
-        if has_component and len(debug_sample) < 10:
-            debug_sample.append(f"title={title[:40]!r} blocked={blocked_by} href={href[:60]}")
-
-        if not has_component or blocked_by:
-            continue
+        if len(debug_sample) < 10:
+            debug_sample.append(f"title={title[:40]!r} href={href[:60]}")
 
         seen.add(href)
+
+        # Fallback title from URL parameter if inner_text is empty
+        if not title:
+            sp = href.split("sp=")[-1][:20] if "sp=" in href else ""
+            title = f"Tender {sp}" if sp else "Untitled Tender"
+
         if kw and kw not in title.lower():
             continue
+
         full_href = base + href if href.startswith("/") else href
         results.append(_build_notice(state, url, title, full_href))
 
-    # Store debug sample
     import streamlit as _st
     existing = _st.session_state.get("gepnic_debug", [])
     existing.append(f"=={state}== ({len(all_els)} candidates, {len(results)} results)")
@@ -1310,10 +1308,16 @@ def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_resu
         except Exception:
             pass
 
-        # Extended wait for Tapestry/Angular JS widgets to fully render
-        page.wait_for_timeout(8000)
+        # Wait for JS widgets to render
+        page.wait_for_timeout(5000)
 
-        html = page.content()
+        try:
+            html = page.content()
+        except Exception as e:
+            import streamlit as _st
+            _st.session_state[f"diag_{state}"] = {"error": f"content() failed: {e}"}
+            return []
+
         diag["title"]       = page.title()
         diag["url"]         = page.url
         diag["html_len"]    = len(html)
