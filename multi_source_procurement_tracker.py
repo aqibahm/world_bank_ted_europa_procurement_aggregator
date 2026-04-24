@@ -1917,22 +1917,17 @@ with tab_state:
         def _do_scan():
             if not selected_portals:
                 st.warning("No states selected — pick at least one in the sidebar.")
-                return
-            _status = st.empty()
-            with _status.container():
-                st.info(
-                    f"⏳ Scanning **{len(selected_portals)}** portal(s)…  "
-                    f"{'Keyword: *' + portal_keyword.strip() + '*' if portal_keyword.strip() else 'Loading all tenders'}"
-                )
+                return False
             with st.spinner(f"Scanning {len(selected_portals)} portal(s)…"):
                 _results = fetch_state_portals(selected_portals, portal_keyword.strip(), portal_max_results)
             st.session_state["state_results"]   = _results
             st.session_state["state_cache_key"] = _cache_key
-            _status.empty()
+            return True
 
-        # Sidebar button re-scan (keyword/state changed)
+        # Sidebar button re-scan
         if portal_scan_btn:
-            _do_scan()
+            if _do_scan():
+                st.rerun()
 
         state_results: list = st.session_state.get("state_results", [])
 
