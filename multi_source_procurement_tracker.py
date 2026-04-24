@@ -1309,21 +1309,27 @@ def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_resu
             page.goto(url, timeout=30000, wait_until="networkidle")
         except Exception:
             pass
-        page.wait_for_timeout(5000)
 
-        diag["title"]        = page.title()
-        diag["url"]          = page.url
-        diag["html_len"]     = len(page.content())
-        diag["all_anchors"]  = len(page.query_selector_all("a[href]"))
-        diag["td_anchors"]   = len(page.query_selector_all("td a[href]"))
-        diag["tables"]       = len(page.query_selector_all("table"))
-        diag["component_links"] = len(page.query_selector_all("a[href*='component=']"))
+        # Extended wait for Tapestry/Angular JS widgets to fully render
+        page.wait_for_timeout(8000)
 
-        # Sample first 5 td anchor hrefs for debugging
-        sample_hrefs = []
-        for el in page.query_selector_all("td a[href]")[:5]:
-            sample_hrefs.append((el.inner_text() or "").strip()[:30] + " | " + (el.get_attribute("href") or "")[:80])
-        diag["sample_hrefs"] = sample_hrefs
+        html = page.content()
+        diag["title"]       = page.title()
+        diag["url"]         = page.url
+        diag["html_len"]    = len(html)
+        diag["all_anchors"] = len(page.query_selector_all("a[href]"))
+
+        td_els = page.query_selector_all("td a[href], span a[href]")
+        diag["td_anchors"] = len(td_els)
+        diag["tables"]     = len(page.query_selector_all("table"))
+
+        # Correctly count actual component= links (not page= links)
+        comp_els = [el for el in td_els if "component=" in (el.get_attribute("href") or "")]
+        diag["component_links"] = len(comp_els)
+        diag["sample_hrefs"]    = [
+            (el.inner_text() or "").strip()[:30] + " | " + (el.get_attribute("href") or "")[:80]
+            for el in comp_els[:5]
+        ]
 
         has_angular_tabs = any(page.query_selector(sel) for sel in _NIC_TAB_SELECTORS)
         has_gepnic_nav   = bool(page.query_selector(f"a[href*='{_GEPNIC_ACTIVE_PAGE}']"))
@@ -1358,7 +1364,13 @@ def fetch_state_portals(selected_portals: list, keyword: str = "", max_results: 
     debug_log   = []
 
     with _sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=True, args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--single-process",
+            "--disable-extensions",
+        ])
         try:
             for p in selected_portals:
                 before = len(all_results)
