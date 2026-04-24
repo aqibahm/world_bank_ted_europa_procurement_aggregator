@@ -1174,6 +1174,84 @@ def _build_notice(state: str, url: str, title: str, href: str,
     }
 
 
+def _scrape_bihar_api(state: str, kw: str, max_results: int) -> list:
+    """
+    Bihar's eProcurement portal is an AngularJS app that crashes Playwright
+    on cloud containers. Instead we call its JSON/HTML API directly with
+    requests, which works from any IP.
+    """
+    results = []
+    base    = "https://eproc2.bihar.gov.in"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/html, */*",
+        "Referer": base + "/EPSV2Web/openarea/tenderListingPage.action",
+    }
+
+    # Try the JSON endpoint first
+    endpoints = [
+        f"{base}/EPSV2Web/openarea/tenderListAction.action?tabIndex=0&pageNo=1&pageSize={max_results}",
+        f"{base}/EPSV2Web/openarea/tenderListAction.action?tabIndex=3&pageNo=1&pageSize={max_results}",
+    ]
+
+    for endpoint in endpoints:
+        try:
+            r = requests.get(endpoint, headers=headers, timeout=15)
+            if r.status_code != 200 or len(r.text) < 100:
+                continue
+
+            # Try JSON parse
+            try:
+                data = r.json()
+                rows = (data.get("tenderList") or data.get("data") or
+                        data.get("tenders") or data.get("result") or [])
+                for row in rows[:max_results]:
+                    if isinstance(row, dict):
+                        title    = (row.get("tenderTitle") or row.get("workName") or
+                                    row.get("tenderDesc") or row.get("description") or "")
+                        ref_no   = (row.get("tenderReferenceNo") or row.get("refNo") or
+                                    row.get("tenderId") or "")
+                        dept     = (row.get("departmentName") or row.get("department") or "")
+                        deadline = (row.get("bidEndDate") or row.get("endDate") or
+                                    row.get("closingDate") or "")
+                        if not title:
+                            continue
+                        if kw and kw not in title.lower() and kw not in dept.lower():
+                            continue
+                        results.append(_build_notice(state, base, title, "", ref_no, ref_no, dept, deadline))
+                if results:
+                    return results
+            except Exception:
+                pass
+
+            # Try HTML parse
+            soup = BeautifulSoup(r.text, "html.parser")
+            # Look for table rows
+            for row in soup.select("tr"):
+                cells = row.find_all("td")
+                if len(cells) < 4:
+                    continue
+                title = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                ref   = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                dept  = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+                dl    = cells[5].get_text(strip=True) if len(cells) > 5 else ""
+                if not title or title.lower() in ("tender description", "name of work"):
+                    continue
+                if kw and kw not in title.lower():
+                    continue
+                a = cells[2].find("a", href=True)
+                link = base + a["href"] if a and a["href"].startswith("/") else ""
+                results.append(_build_notice(state, base, title, link, ref, ref, dept, dl))
+                if len(results) >= max_results:
+                    break
+            if results:
+                return results
+        except Exception:
+            continue
+
+    return results
+
+
 def _scrape_angular(page, state: str, url: str, kw: str, max_results: int) -> list:
     """Bihar-style: click Angular tab, read Bootstrap striped table rows."""
     results = []
@@ -1264,7 +1342,13 @@ def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> lis
         href  = (el.get_attribute("href") or "").strip()
         title = (el.inner_text() or "").strip()
 
-        # href is mandatory; title can be empty (image-only anchors)
+        # If anchor text is empty, try reading from the parent TD
+        if not title:
+            title = (el.evaluate(
+                "el => el.closest('td')?.innerText || el.parentElement?.innerText || ''"
+            ) or "").strip()
+
+        # href is mandatory
         if not href or href in seen:
             continue
         if "component=" not in href and "%24" not in href:
@@ -1277,7 +1361,7 @@ def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> lis
 
         seen.add(href)
 
-        # Fallback title from URL parameter if inner_text is empty
+        # Last-resort fallback title
         if not title:
             sp = href.split("sp=")[-1][:20] if "sp=" in href else ""
             title = f"Tender {sp}" if sp else "Untitled Tender"
@@ -1298,7 +1382,12 @@ def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> lis
 
 
 def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_results: int = 50) -> list:
-    kw   = keyword.strip().lower()
+    kw = keyword.strip().lower()
+
+    # Bihar's Angular portal crashes Playwright on cloud — use direct API instead
+    if "eproc2.bihar.gov.in" in url:
+        return _scrape_bihar_api(state, kw, max_results)
+
     page = browser.new_page()
     diag = {}
 
