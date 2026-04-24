@@ -1300,8 +1300,12 @@ def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_resu
     page = browser.new_page()
 
     try:
-        page.goto(url, timeout=30000, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
+        try:
+            page.goto(url, timeout=30000, wait_until="networkidle")
+        except Exception:
+            # networkidle can timeout on some portals — fall through with whatever loaded
+            pass
+        page.wait_for_timeout(5000)
 
         has_angular_tabs = any(page.query_selector(sel) for sel in _NIC_TAB_SELECTORS)
         has_gepnic_nav   = bool(page.query_selector(f"a[href*='{_GEPNIC_ACTIVE_PAGE}']"))
@@ -1325,18 +1329,23 @@ def fetch_state_portals(selected_portals: list, keyword: str = "", max_results: 
         return []
 
     all_results = []
+    debug_log   = []
 
     with _sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         try:
             for p in selected_portals:
-                all_results.extend(
-                    _scrape_portal_pw(browser, p["state"], p["url"], keyword, max_results)
-                )
+                before = len(all_results)
+                rows   = _scrape_portal_pw(browser, p["state"], p["url"], keyword, max_results)
+                all_results.extend(rows)
+                debug_log.append(f"{p['state']}: {len(rows)} rows")
                 time.sleep(2)
         finally:
             browser.close()
 
+    # Store debug log in session state so tab can display it
+    import streamlit as _st
+    _st.session_state["state_portals_debug"] = debug_log
     return all_results
 
 
@@ -1930,7 +1939,7 @@ with tab_state:
             st.info(f"DEBUG: scanning {len(selected_portals)} portal(s): {[p['state'] for p in selected_portals[:3]]}")
             with st.spinner(f"Scanning {len(selected_portals)} portal(s)…"):
                 _results = fetch_state_portals(selected_portals, portal_keyword.strip(), portal_max_results)
-            st.info(f"DEBUG: got {len(_results)} results")
+            st.info(f"DEBUG: got {len(_results)} results. session_state key set: {'state_results' in st.session_state}")
             st.session_state["state_results"]   = _results
             st.session_state["state_cache_key"] = _cache_key
             return True
@@ -1976,6 +1985,10 @@ with tab_state:
 
         else:
             st.markdown("### 🏛 India State Portal Tenders")
+            if st.session_state.get("state_portals_debug"):
+                st.warning("Scan complete but no results. Per-portal breakdown:")
+                for line in st.session_state["state_portals_debug"]:
+                    st.caption(line)
             if st.button("🔬 Load Latest State Tenders", type="primary", use_container_width=False, key="inline_state_btn"):
                 if _do_scan():
                     st.rerun()
