@@ -1049,6 +1049,25 @@ def fetch_adb(keyword: str, rows: int) -> list:
 #  Scraping uses Selenium headless Chrome (JS-rendered pages).
 # ══════════════════════════════════════════════════════════════
 
+def get_browser(pw):
+    try:
+        return pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+    except Exception as e:
+        import subprocess
+        import sys
+
+        # Attempt to install browsers dynamically
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"])
+
+        # Retry once
+        return pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+
 try:
     from playwright.sync_api import sync_playwright as _sync_playwright
     _PLAYWRIGHT_AVAILABLE = True
@@ -1320,7 +1339,7 @@ def fetch_state_portals(selected_portals: list, keyword: str = "", max_results: 
     all_results = []
 
     with _sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = get_browser(pw)
         try:
             for p in selected_portals:
                 all_results.extend(
