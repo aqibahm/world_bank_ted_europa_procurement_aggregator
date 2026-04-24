@@ -27,7 +27,6 @@ no external Excel file is required.
 import io
 import json
 import os
-import sys
 import sqlite3
 import smtplib
 import subprocess
@@ -42,12 +41,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
-
-if not os.path.exists(os.path.expanduser("~/.cache/ms-playwright")):
-    subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        check=False
-    )
 
 try:
     from deep_translator import GoogleTranslator
@@ -1056,8 +1049,6 @@ def fetch_adb(keyword: str, rows: int) -> list:
 #  Scraping uses Selenium headless Chrome (JS-rendered pages).
 # ══════════════════════════════════════════════════════════════
 
-
-
 try:
     from playwright.sync_api import sync_playwright as _sync_playwright
     _PLAYWRIGHT_AVAILABLE = True
@@ -1338,9 +1329,6 @@ def fetch_state_portals(selected_portals: list, keyword: str = "", max_results: 
                 time.sleep(2)
         finally:
             browser.close()
-
-    return all_results
-
 
     return all_results
 
