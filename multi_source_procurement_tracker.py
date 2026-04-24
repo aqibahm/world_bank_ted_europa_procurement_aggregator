@@ -1298,17 +1298,31 @@ def _scrape_gepnic(page, state: str, url: str, kw: str, max_results: int) -> lis
 def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_results: int = 50) -> list:
     kw   = keyword.strip().lower()
     page = browser.new_page()
+    diag = {}
 
     try:
         try:
             page.goto(url, timeout=30000, wait_until="networkidle")
         except Exception:
-            # networkidle can timeout on some portals — fall through with whatever loaded
             pass
         page.wait_for_timeout(5000)
 
+        diag["title"]        = page.title()
+        diag["url"]          = page.url
+        diag["html_len"]     = len(page.content())
+        diag["all_anchors"]  = len(page.query_selector_all("a[href]"))
+        diag["td_anchors"]   = len(page.query_selector_all("td a[href]"))
+        diag["tables"]       = len(page.query_selector_all("table"))
+        diag["component_links"] = len(page.query_selector_all("a[href*='component=']"))
+
         has_angular_tabs = any(page.query_selector(sel) for sel in _NIC_TAB_SELECTORS)
         has_gepnic_nav   = bool(page.query_selector(f"a[href*='{_GEPNIC_ACTIVE_PAGE}']"))
+        diag["has_angular"] = has_angular_tabs
+        diag["has_gepnic"]  = has_gepnic_nav
+        diag["strategy"]    = "angular" if has_angular_tabs else "gepnic"
+
+        import streamlit as _st
+        _st.session_state[f"diag_{state}"] = diag
 
         if has_angular_tabs:
             return _scrape_angular(page, state, url, kw, max_results)
@@ -1317,7 +1331,9 @@ def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_resu
         else:
             return _scrape_gepnic(page, state, url, kw, max_results)
 
-    except Exception:
+    except Exception as e:
+        import streamlit as _st
+        _st.session_state[f"diag_{state}"] = {"error": str(e)}
         return []
     finally:
         page.close()
@@ -1989,6 +2005,24 @@ with tab_state:
                 st.warning("Scan complete but no results. Per-portal breakdown:")
                 for line in st.session_state["state_portals_debug"]:
                     st.caption(line)
+                # Show detailed diagnostics
+                for p in [p for p in STATE_PORTALS if p["state"] in selected_state_names]:
+                    diag = st.session_state.get(f"diag_{p['state']}")
+                    if diag:
+                        st.caption(
+                            f"**{p['state']}** — "
+                            + (f"error: {diag['error']}" if "error" in diag else
+                               f"title={diag.get('title')!r} "
+                               f"html={diag.get('html_len')} "
+                               f"anchors={diag.get('all_anchors')} "
+                               f"td_anchors={diag.get('td_anchors')} "
+                               f"tables={diag.get('tables')} "
+                               f"component_links={diag.get('component_links')} "
+                               f"angular={diag.get('has_angular')} "
+                               f"gepnic={diag.get('has_gepnic')} "
+                               f"strategy={diag.get('strategy')}"
+                            )
+                        )
             if st.button("🔬 Load Latest State Tenders", type="primary", use_container_width=False, key="inline_state_btn"):
                 if _do_scan():
                     st.rerun()
