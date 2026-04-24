@@ -1291,12 +1291,6 @@ def _scrape_portal_pw(browser, state: str, url: str, keyword: str = "", max_resu
         page.goto(url, timeout=30000, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
 
-        # Detect IP block — Indian govt portals return a plain-text block page
-        html = page.content()
-        if len(html) < 500 or "not in allowlist" in html.lower() or "access denied" in html.lower():
-            return [{"_blocked": True, "state": state}]
-
-        # Detect portal type
         has_angular_tabs = any(page.query_selector(sel) for sel in _NIC_TAB_SELECTORS)
         has_gepnic_nav   = bool(page.query_selector(f"a[href*='{_GEPNIC_ACTIVE_PAGE}']"))
 
@@ -1318,28 +1312,18 @@ def fetch_state_portals(selected_portals: list, keyword: str = "", max_results: 
     if not _PLAYWRIGHT_AVAILABLE:
         return []
 
-    all_results  = []
-    blocked      = []
+    all_results = []
 
     with _sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         try:
             for p in selected_portals:
-                rows = _scrape_portal_pw(browser, p["state"], p["url"], keyword, max_results)
-                for r in rows:
-                    if r.get("_blocked"):
-                        blocked.append(p["state"])
-                    else:
-                        all_results.append(r)
+                all_results.extend(
+                    _scrape_portal_pw(browser, p["state"], p["url"], keyword, max_results)
+                )
                 time.sleep(2)
         finally:
             browser.close()
-
-    if blocked and not all_results:
-        # All portals IP-blocked — store flag so the UI can show a helpful message
-        st.session_state["state_portals_blocked"] = blocked
-    else:
-        st.session_state.pop("state_portals_blocked", None)
 
     return all_results
 
@@ -1975,19 +1959,10 @@ with tab_state:
                 render_notice(notice, i)
 
         else:
-            if st.session_state.get("state_portals_blocked"):
-                st.error(
-                    "🚫 **Access blocked by state portals.**  \n"
-                    "Indian government e-procurement portals restrict access to non-Indian IP addresses. "
-                    "This feature only works when the app is **run locally on a machine with an Indian IP**, "
-                    "or via a VPN/proxy with an Indian IP.  \n\n"
-                    f"Blocked: {', '.join(st.session_state['state_portals_blocked'])}"
-                )
-            else:
-                st.markdown("### 🏛 India State Portal Tenders")
-                if st.button("🔬 Load Latest State Tenders", type="primary", use_container_width=False, key="inline_state_btn"):
-                    if _do_scan():
-                        st.rerun()
+            st.markdown("### 🏛 India State Portal Tenders")
+            if st.button("🔬 Load Latest State Tenders", type="primary", use_container_width=False, key="inline_state_btn"):
+                if _do_scan():
+                    st.rerun()
 
 # ══════════════════════════════════════════════════════════════
 #  TAB 3 — ALERTS
