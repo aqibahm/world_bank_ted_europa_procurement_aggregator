@@ -41,7 +41,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
-import playwright
 import sys
 
 def install_playwright_chromium():
